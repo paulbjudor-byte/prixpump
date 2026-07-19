@@ -1,30 +1,19 @@
-import { useState, useMemo, useEffect } from "react";
-import { MapPin, Fuel, Navigation, Sparkles, Zap, LocateFixed, Loader2 } from "lucide-react";
+import { useState, useMemo, useEffect, useCallback } from "react";
+import { MapPin, Fuel, Navigation, Sparkles, Zap, LocateFixed, Loader2, Search } from "lucide-react";
 
-// ---- Mock data --------------------------------------------------------
+// ---- Config -------------------------------------------------------
 const FUELS = [
-  { id: "gazole", label: "Gazole", color: "#FF4D6D", base: 1.72 },
-  { id: "sp95", label: "SP95", color: "#FFB020", base: 1.79 },
-  { id: "sp98", label: "SP98", color: "#00C896", base: 1.85 },
-  { id: "e85", label: "E85", color: "#3EA6FF", base: 0.99 },
+  { id: "gazole", label: "Gazole", color: "#FF4D6D" },
+  { id: "sp95", label: "SP95", color: "#FFB020" },
+  { id: "e10", label: "E10", color: "#8B5CF6" },
+  { id: "sp98", label: "SP98", color: "#00C896" },
+  { id: "e85", label: "E85", color: "#3EA6FF" },
 ];
 
-const BRANDS = [
-  { name: "TotalEnergies", initials: "TE", color: "#EE2E24" },
-  { name: "Intermarché", initials: "IM", color: "#E2001A" },
-  { name: "Leclerc", initials: "LC", color: "#0055A4" },
-  { name: "Carrefour", initials: "CA", color: "#004E9F" },
-  { name: "Esso", initials: "ES", color: "#00539B" },
-  { name: "Auchan", initials: "AU", color: "#C8102E" },
-];
+const CARBURANTS_API =
+  "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
+const GEOCODE_API = "https://api-adresse.data.gouv.fr/search/";
 
-function seededOffset(seed, spread) {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  return ((h % 1000) / 1000 - 0.5) * spread;
-}
-
-// Haversine distance in km between two lat/lon points
 function distanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -37,40 +26,38 @@ function distanceKm(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Build stations either around a real coordinate (geolocation) or a mock city seed
-function buildStations({ city, coords }) {
-  const seedBase = coords ? `${coords.lat.toFixed(2)},${coords.lon.toFixed(2)}` : city;
+async function geocodeCity(query) {
+  const url = `${GEOCODE_API}?q=${encodeURIComponent(query)}&limit=1`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Geocoding failed");
+  const data = await res.json();
+  if (!data.features || data.features.length === 0) return null;
+  const [lon, lat] = data.features[0].geometry.coordinates;
+  const label = data.features[0].properties.label;
+  return { lat, lon, label };
+}
 
-  return BRANDS.map((b, i) => {
-    const seed = seedBase + b.name;
-    const prices = {};
-    FUELS.forEach((f) => {
-      prices[f.id] = Math.max(1.2, f.base + seededOffset(seed + f.id, 0.16));
-    });
-
-    let distance, stationCoords;
-    if (coords) {
-      // scatter stations within ~4km of the real user position
-      const dLat = seededOffset(seed + "lat", 0.035);
-      const dLon = seededOffset(seed + "lon", 0.035);
-      stationCoords = { lat: coords.lat + dLat, lon: coords.lon + dLon };
-      distance = distanceKm(coords.lat, coords.lon, stationCoords.lat, stationCoords.lon);
-    } else {
-      distance = Math.max(0.3, 1.5 + seededOffset(seed, 6));
-    }
-
-    return {
-      id: b.name,
-      brand: b.name,
-      initials: b.initials,
-      brandColor: b.color,
-      address: `${2 + i} rue ${
-        ["de la Gare", "Principale", "du Marché", "de la République", "des Écoles", "de la Poste"][i]
-      }, ${city || "près de toi"}`,
-      distance,
-      prices,
-    };
-  });
+async function fetchNearbyStations(lat, lon, radiusKm = 15, limit = 20) {
+  const where = `distance(geom, geom'POINT(${lon} ${lat})', ${radiusKm}km)`;
+  const url = `${CARBURANTS_API}?where=${encodeURIComponent(where)}&limit=${limit}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Fuel API failed");
+  const data = await res.json();
+  return (data.results || [])
+    .filter((r) => r.geom)
+    .map((r) => ({
+      id: r.id,
+      address: r.adresse || "Adresse non renseignée",
+      city: r.ville || "",
+      distance: distanceKm(lat, lon, r.geom.lat, r.geom.lon),
+      prices: {
+        gazole: r.gazole_prix ?? null,
+        sp95: r.sp95_prix ?? null,
+        e10: r.e10_prix ?? null,
+        sp98: r.sp98_prix ?? null,
+        e85: r.e85_prix ?? null,
+      },
+    }));
 }
 
 function PriceBadge({ value, color, big }) {
@@ -98,20 +85,20 @@ function StationCard({ station, fuel, isBest, rank }) {
         boxShadow: isBest
           ? `0 8px 24px -8px ${fuel.color}55`
           : "0 2px 8px -4px rgba(45,27,54,0.08)",
-        animation: `pop-in 0.4s ease-out ${rank * 0.06}s both`,
+        animation: `pop-in 0.4s ease-out ${Math.min(rank, 8) * 0.06}s both`,
       }}
     >
       <div className="flex items-center gap-3 min-w-0">
         <div
-          className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white font-display font-bold text-sm shadow-sm"
-          style={{ background: station.brandColor }}
+          className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white shadow-sm"
+          style={{ background: isBest ? fuel.color : "#2D1B36" }}
         >
-          {station.initials}
+          <Fuel size={18} />
         </div>
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-[#2D1B36] truncate">
-              {station.brand}
+              {station.address}
             </span>
             {isBest && (
               <span
@@ -124,28 +111,64 @@ function StationCard({ station, fuel, isBest, rank }) {
           </div>
           <p className="text-xs text-[#8A7B92] truncate flex items-center gap-1">
             <Navigation size={10} /> {station.distance.toFixed(1)} km ·{" "}
-            {station.address}
+            {station.city}
           </p>
         </div>
       </div>
-      <PriceBadge value={price} color={isBest ? fuel.color : "#2D1B36"} big={isBest} />
+      {price != null ? (
+        <PriceBadge value={price} color={isBest ? fuel.color : "#2D1B36"} big={isBest} />
+      ) : (
+        <span className="text-xs text-[#C4B8C9] font-medium">Indispo.</span>
+      )}
     </div>
   );
 }
 
 export default function App() {
-  const [city, setCity] = useState("Lyon");
   const [inputCity, setInputCity] = useState("Lyon");
   const [fuelId, setFuelId] = useState("gazole");
   const [pulse, setPulse] = useState(false);
   const [coords, setCoords] = useState(null);
-  const [locStatus, setLocStatus] = useState("idle"); // idle | loading | granted | denied | unsupported
+  const [placeLabel, setPlaceLabel] = useState("");
+  const [locStatus, setLocStatus] = useState("idle");
+  const [stations, setStations] = useState([]);
+  const [loadingStations, setLoadingStations] = useState(false);
+  const [fetchError, setFetchError] = useState(null);
+
+  const loadStations = useCallback(async (lat, lon) => {
+    setLoadingStations(true);
+    setFetchError(null);
+    try {
+      const results = await fetchNearbyStations(lat, lon);
+      setStations(results);
+    } catch (err) {
+      setFetchError("Impossible de charger les prix pour l'instant. Réessaie dans un instant.");
+    } finally {
+      setLoadingStations(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const place = await geocodeCity("Lyon");
+        if (place) {
+          setCoords({ lat: place.lat, lon: place.lon });
+          setPlaceLabel(place.label);
+          loadStations(place.lat, place.lon);
+        }
+      } catch {
+        setFetchError("Impossible de contacter les services de données pour l'instant.");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     setPulse(true);
     const t = setTimeout(() => setPulse(false), 400);
     return () => clearTimeout(t);
-  }, [fuelId, city, coords]);
+  }, [fuelId, coords]);
 
   const handleLocate = () => {
     if (!("geolocation" in navigator)) {
@@ -156,34 +179,52 @@ export default function App() {
     try {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          setCoords({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          setCoords({ lat, lon });
+          setPlaceLabel("ta position actuelle");
           setLocStatus("granted");
+          loadStations(lat, lon);
         },
-        () => {
-          setLocStatus("denied");
-        },
+        () => setLocStatus("denied"),
         { enableHighAccuracy: true, timeout: 8000 }
       );
-    } catch (err) {
+    } catch {
       setLocStatus("unsupported");
     }
   };
 
+  const handleCitySearch = async (e) => {
+    e.preventDefault();
+    setLocStatus("idle");
+    setFetchError(null);
+    try {
+      const place = await geocodeCity(inputCity.trim() || "Lyon");
+      if (place) {
+        setCoords({ lat: place.lat, lon: place.lon });
+        setPlaceLabel(place.label);
+        loadStations(place.lat, place.lon);
+      } else {
+        setFetchError("Ville introuvable, essaie une autre orthographe.");
+      }
+    } catch {
+      setFetchError("Impossible de contacter le service de recherche de ville.");
+    }
+  };
+
   const fuel = FUELS.find((f) => f.id === fuelId);
-  const stations = useMemo(
-    () => buildStations({ city, coords }),
-    [city, coords]
-  );
 
-  // sort by distance when we have real geolocation, otherwise by price
   const sorted = useMemo(() => {
-    const arr = [...stations];
-    if (coords) arr.sort((a, b) => a.distance - b.distance);
-    else arr.sort((a, b) => a.prices[fuelId] - b.prices[fuelId]);
-    return arr;
-  }, [stations, coords, fuelId]);
+    return [...stations].sort((a, b) => a.distance - b.distance);
+  }, [stations]);
 
-  const byPrice = [...stations].sort((a, b) => a.prices[fuelId] - b.prices[fuelId]);
+  const byPrice = useMemo(
+    () =>
+      [...stations]
+        .filter((s) => s.prices[fuelId] != null)
+        .sort((a, b) => a.prices[fuelId] - b.prices[fuelId]),
+    [stations, fuelId]
+  );
   const cheapest = byPrice[0];
   const priciest = byPrice[byPrice.length - 1];
   const savingsEuros = cheapest ? priciest.prices[fuelId] - cheapest.prices[fuelId] : 0;
@@ -209,7 +250,6 @@ export default function App() {
         .blob { animation: blob-float 8s ease-in-out infinite; }
       `}</style>
 
-      {/* Decorative gradient blobs */}
       <div
         className="blob absolute -top-24 -right-24 w-72 h-72 rounded-full opacity-30 blur-3xl pointer-events-none"
         style={{ background: "linear-gradient(135deg, #FF4D6D, #FFB020)" }}
@@ -219,11 +259,10 @@ export default function App() {
         style={{ background: "linear-gradient(135deg, #3EA6FF, #00C896)", animationDelay: "2s" }}
       />
 
-      {/* Hero */}
       <header className="relative max-w-3xl mx-auto px-6 md:px-12 pt-14 pb-8">
         <div className="inline-flex items-center gap-1.5 bg-white rounded-full px-3 py-1.5 text-xs font-semibold text-[#8A7B92] mb-5 shadow-sm">
           <Zap size={12} className="text-[#FFB020]" style={{ animation: "wiggle 1.5s ease-in-out infinite" }} />
-          Prix mis à jour en continu
+          Données officielles, mises à jour en continu
         </div>
         <h1 className="font-display text-5xl md:text-7xl leading-[0.95] mb-3">
           <span className="bg-clip-text text-transparent bg-gradient-to-r from-[#FF4D6D] via-[#FF8A3D] to-[#FFB020]">
@@ -238,7 +277,6 @@ export default function App() {
       </header>
 
       <main className="relative max-w-3xl mx-auto px-6 md:px-12 pb-8 space-y-6">
-        {/* Geolocation button */}
         <button
           onClick={handleLocate}
           disabled={locStatus === "loading"}
@@ -260,20 +298,14 @@ export default function App() {
 
         {locStatus === "denied" && (
           <p className="text-sm text-[#FF4D6D] bg-[#FF4D6D]/10 rounded-xl px-4 py-2.5">
-            Localisation refusée ou indisponible ici — tu peux chercher une
-            ville manuellement ci-dessous à la place.
+            Localisation refusée ou indisponible ici — cherche une ville
+            manuellement ci-dessous à la place.
           </p>
         )}
         {locStatus === "unsupported" && (
           <p className="text-sm text-[#FF4D6D] bg-[#FF4D6D]/10 rounded-xl px-4 py-2.5">
             La géolocalisation n'est pas disponible dans cet aperçu — elle
             fonctionnera normalement une fois le site publié en ligne.
-          </p>
-        )}
-        {locStatus === "granted" && (
-          <p className="text-sm text-[#00C896] bg-[#00C896]/10 rounded-xl px-4 py-2.5 flex items-center gap-1.5">
-            <MapPin size={14} /> Position trouvée — stations triées par
-            distance.
           </p>
         )}
 
@@ -285,14 +317,8 @@ export default function App() {
           <div className="h-px flex-1 bg-[#F0EAE2]" />
         </div>
 
-        {/* Location input */}
         <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            setCoords(null);
-            setLocStatus("idle");
-            setCity(inputCity.trim() || "Lyon");
-          }}
+          onSubmit={handleCitySearch}
           className="flex items-center gap-2 bg-white rounded-2xl px-4 py-3 shadow-[0_4px_20px_-6px_rgba(45,27,54,0.15)]"
         >
           <MapPin size={20} className="text-[#FF4D6D] shrink-0" />
@@ -304,14 +330,19 @@ export default function App() {
           />
           <button
             type="submit"
-            className="text-sm font-bold text-white px-4 py-2 rounded-xl shrink-0 transition-transform hover:scale-105 active:scale-95"
+            className="flex items-center gap-1.5 text-sm font-bold text-white px-4 py-2 rounded-xl shrink-0 transition-transform hover:scale-105 active:scale-95"
             style={{ background: "linear-gradient(135deg, #FF4D6D, #FF8A3D)" }}
           >
-            C'est parti
+            <Search size={14} /> Chercher
           </button>
         </form>
 
-        {/* Fuel selector */}
+        {placeLabel && (
+          <p className="text-xs text-[#8A7B92] font-medium -mt-3">
+            Résultats autour de <span className="font-semibold">{placeLabel}</span>
+          </p>
+        )}
+
         <div className="flex flex-wrap gap-2">
           {FUELS.map((f) => (
             <button
@@ -332,8 +363,20 @@ export default function App() {
           ))}
         </div>
 
-        {/* Savings banner */}
-        {cheapest && savingsEuros > 0.01 && (
+        {fetchError && (
+          <p className="text-sm text-[#FF4D6D] bg-[#FF4D6D]/10 rounded-xl px-4 py-2.5">
+            {fetchError}
+          </p>
+        )}
+
+        {loadingStations && (
+          <div className="flex items-center gap-2 text-[#8A7B92] text-sm font-medium px-1">
+            <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+            Chargement des prix en temps réel…
+          </div>
+        )}
+
+        {!loadingStations && cheapest && savingsEuros > 0.01 && (
           <div
             className={`flex items-center gap-3 px-5 py-4 rounded-2xl text-white transition-transform ${pulse ? "scale-[1.02]" : "scale-100"}`}
             style={{ background: `linear-gradient(135deg, ${fuel.color}, #2D1B36)` }}
@@ -344,12 +387,17 @@ export default function App() {
               <span className="font-display text-lg">
                 {savingsEuros.toFixed(3)}&nbsp;€/L
               </span>{" "}
-              en choisissant bien ta station {coords ? "autour de toi" : `à ${city}`} 🎉
+              en choisissant bien ta station 🎉
             </span>
           </div>
         )}
 
-        {/* Station list */}
+        {!loadingStations && stations.length === 0 && !fetchError && (
+          <p className="text-sm text-[#8A7B92] px-1">
+            Aucune station trouvée dans ce secteur — essaie une autre ville.
+          </p>
+        )}
+
         <div className="space-y-2.5">
           {sorted.map((station, i) => (
             <StationCard
@@ -365,8 +413,9 @@ export default function App() {
 
       <footer className="relative max-w-3xl mx-auto px-6 md:px-12 py-8">
         <p className="text-xs text-[#C4B8C9] font-medium">
-          Prix simulés pour la démo — version réelle branchée sur les données
-          ouvertes du gouvernement français, actualisées toutes les 10 min. ⛽
+          Données officielles issues de data.economie.gouv.fr (DGCCRF),
+          actualisées toutes les 10 min. Géocodage via l'API Adresse (Base
+          Adresse Nationale). ⛽
         </p>
       </footer>
     </div>
