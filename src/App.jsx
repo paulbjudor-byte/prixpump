@@ -1,5 +1,19 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
-import { MapPin, Fuel, Navigation, Sparkles, Zap, LocateFixed, Loader2, Search } from "lucide-react";
+import {
+  MapPin,
+  Fuel,
+  Navigation,
+  Sparkles,
+  Zap,
+  LocateFixed,
+  Loader2,
+  Search,
+  Clock,
+  ExternalLink,
+  ChevronDown,
+  TrendingUp,
+  Gauge,
+} from "lucide-react";
 
 // ---- Config -------------------------------------------------------
 const FUELS = [
@@ -9,6 +23,11 @@ const FUELS = [
   { id: "sp98", label: "SP98", color: "#00C896" },
   { id: "e85", label: "E85", color: "#3EA6FF" },
 ];
+
+// Rough average consumption assumption used only to estimate the cost of
+// driving to a station further away — adjustable by the user in the UI.
+const DEFAULT_CONSUMPTION_L_PER_100KM = 6;
+const DEFAULT_FILL_LITERS = 40;
 
 const CARBURANTS_API =
   "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
@@ -37,6 +56,48 @@ async function geocodeCity(query) {
   return { lat, lon, label };
 }
 
+// Fetch up to 5 city/address suggestions for the autocomplete dropdown
+async function fetchCitySuggestions(query) {
+  if (!query || query.trim().length < 2) return [];
+  const url = `${GEOCODE_API}?q=${encodeURIComponent(query)}&type=municipality&limit=5`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.features || []).map((f) => ({
+    label: f.properties.label,
+    lat: f.geometry.coordinates[1],
+    lon: f.geometry.coordinates[0],
+  }));
+}
+
+// Parse the raw "horaires" field returned by the API into a simple weekly list.
+// The field is itself a JSON string (sometimes malformed/absent), so this is
+// defensive: it returns null if nothing usable is found.
+function parseHoraires(rawHoraires, automate2424) {
+  if (automate2424 === "Oui") return { alwaysOpen: true, days: [] };
+  if (!rawHoraires) return null;
+  try {
+    const parsed = JSON.parse(rawHoraires);
+    const days = parsed?.jour;
+    if (!Array.isArray(days)) return null;
+    const formatted = days.map((d) => {
+      const name = d["@nom"];
+      if (d["@ferme"] === "1" || d["@ferme"] === "") {
+        const ouverture = d["@ouverture"];
+        const fermeture = d["@fermeture"];
+        if (ouverture && fermeture) {
+          return { name, hours: `${ouverture} – ${fermeture}` };
+        }
+        return { name, hours: d["@ferme"] === "1" ? "Fermé" : null };
+      }
+      return { name, hours: null };
+    });
+    return { alwaysOpen: false, days: formatted };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchNearbyStations(lat, lon, radiusKm = 15, limit = 20) {
   const where = `distance(geom, geom'POINT(${lon} ${lat})', ${radiusKm}km)`;
   const url = `${CARBURANTS_API}?where=${encodeURIComponent(where)}&limit=${limit}`;
@@ -49,6 +110,8 @@ async function fetchNearbyStations(lat, lon, radiusKm = 15, limit = 20) {
       id: r.id,
       address: r.adresse || "Adresse non renseignée",
       city: r.ville || "",
+      lat: r.geom.lat,
+      lon: r.geom.lon,
       distance: distanceKm(lat, lon, r.geom.lat, r.geom.lon),
       prices: {
         gazole: r.gazole_prix ?? null,
@@ -57,7 +120,12 @@ async function fetchNearbyStations(lat, lon, radiusKm = 15, limit = 20) {
         sp98: r.sp98_prix ?? null,
         e85: r.e85_prix ?? null,
       },
+      horaires: parseHoraires(r.horaires, r.horaires_automate_24_24),
     }));
+}
+
+function googleMapsUrl(station) {
+  return `https://www.google.com/maps/dir/?api=1&destination=${station.lat},${station.lon}`;
 }
 
 function PriceBadge({ value, color, big }) {
@@ -72,60 +140,186 @@ function PriceBadge({ value, color, big }) {
   );
 }
 
-function StationCard({ station, fuel, isBest, rank }) {
+function StationDetails({ station, fuel }) {
+  return (
+    <div
+      className="px-5 pb-5 pt-1 space-y-4 rounded-b-2xl"
+      style={{ animation: "expand-in 0.25s ease-out both" }}
+    >
+      {/* Full price table */}
+      <div className="grid grid-cols-2 gap-2">
+        {FUELS.map((f) => {
+          const p = station.prices[f.id];
+          return (
+            <div
+              key={f.id}
+              className="flex items-center justify-between px-3 py-2 rounded-xl bg-white/70"
+            >
+              <span className="text-xs font-semibold text-[#8A7B92]">{f.label}</span>
+              <span
+                className="text-sm font-bold font-display"
+                style={{ color: p != null ? f.color : "#C4B8C9" }}
+              >
+                {p != null ? `${p.toFixed(3)} €` : "—"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Opening hours */}
+      <div className="flex items-start gap-2 text-sm">
+        <Clock size={16} className="text-[#8A7B92] mt-0.5 shrink-0" />
+        {station.horaires?.alwaysOpen ? (
+          <span className="text-[#2D1B36] font-medium">
+            Ouvert 24h/24 (automate)
+          </span>
+        ) : station.horaires?.days?.length ? (
+          <div className="text-[#2D1B36] leading-relaxed">
+            {station.horaires.days.map((d, i) => (
+              <div key={i} className="flex gap-2">
+                <span className="font-medium w-20 shrink-0">{d.name}</span>
+                <span className="text-[#8A7B92]">{d.hours || "Non communiqué"}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <span className="text-[#8A7B92]">
+            Horaires non communiqués — vérifie sur Google Maps.
+          </span>
+        )}
+      </div>
+
+      {/* Directions link */}
+      <a
+        href={googleMapsUrl(station)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl text-sm font-bold text-white transition-transform hover:scale-[1.01] active:scale-[0.99]"
+        style={{ background: `linear-gradient(135deg, ${fuel.color}, #2D1B36)` }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Navigation size={15} />
+        Itinéraire Google Maps
+        <ExternalLink size={13} />
+      </a>
+    </div>
+  );
+}
+
+function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onToggle }) {
   const price = station.prices[fuel.id];
   return (
     <div
-      className="group relative flex items-center justify-between gap-3 px-5 py-4 rounded-2xl transition-all duration-300 hover:-translate-y-0.5"
+      className="rounded-2xl transition-all duration-300 overflow-hidden"
       style={{
-        background: isBest
+        background: isBest || isBestValue
           ? `linear-gradient(135deg, ${fuel.color}18, ${fuel.color}08)`
           : "#FFFFFF",
-        border: isBest ? `2px solid ${fuel.color}` : "2px solid #F0EAE2",
-        boxShadow: isBest
+        border: isBest || isBestValue ? `2px solid ${fuel.color}` : "2px solid #F0EAE2",
+        boxShadow: isBest || isBestValue
           ? `0 8px 24px -8px ${fuel.color}55`
           : "0 2px 8px -4px rgba(45,27,54,0.08)",
         animation: `pop-in 0.4s ease-out ${Math.min(rank, 8) * 0.06}s both`,
       }}
     >
-      <div className="flex items-center gap-3 min-w-0">
-        <div
-          className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white shadow-sm"
-          style={{ background: isBest ? fuel.color : "#2D1B36" }}
-        >
-          <Fuel size={18} />
-        </div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-[#2D1B36] truncate">
-              {station.address}
-            </span>
-            {isBest && (
-              <span
-                className="flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full text-white shrink-0"
-                style={{ background: fuel.color }}
-              >
-                <Sparkles size={10} /> Top prix
-              </span>
-            )}
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between gap-3 px-5 py-4 text-left hover:-translate-y-0 transition-transform"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div
+            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white shadow-sm"
+            style={{ background: isBest || isBestValue ? fuel.color : "#2D1B36" }}
+          >
+            <Fuel size={18} />
           </div>
-          <p className="text-xs text-[#8A7B92] truncate flex items-center gap-1">
-            <Navigation size={10} /> {station.distance.toFixed(1)} km ·{" "}
-            {station.city}
-          </p>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-semibold text-[#2D1B36] truncate">
+                {station.address}
+              </span>
+              {isBest && (
+                <span
+                  className="flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full text-white shrink-0"
+                  style={{ background: fuel.color }}
+                >
+                  <Sparkles size={10} /> Moins cher
+                </span>
+              )}
+              {isBestValue && (
+                <span className="flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full text-white shrink-0 bg-[#2D1B36]">
+                  <TrendingUp size={10} /> Le plus rentable
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-[#8A7B92] truncate flex items-center gap-1">
+              <Navigation size={10} /> {station.distance.toFixed(1)} km ·{" "}
+              {station.city}
+            </p>
+          </div>
         </div>
-      </div>
-      {price != null ? (
-        <PriceBadge value={price} color={isBest ? fuel.color : "#2D1B36"} big={isBest} />
-      ) : (
-        <span className="text-xs text-[#C4B8C9] font-medium">Indispo.</span>
-      )}
+        <div className="flex items-center gap-2 shrink-0">
+          {price != null ? (
+            <PriceBadge value={price} color={isBest || isBestValue ? fuel.color : "#2D1B36"} big={isBest || isBestValue} />
+          ) : (
+            <span className="text-xs text-[#C4B8C9] font-medium">Indispo.</span>
+          )}
+          <ChevronDown
+            size={18}
+            className="text-[#C4B8C9] transition-transform duration-200"
+            style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }}
+          />
+        </div>
+      </button>
+      {expanded && <StationDetails station={station} fuel={fuel} />}
     </div>
   );
 }
 
+function Logo({ size = 44 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 64 64"
+      className="shrink-0 rounded-2xl"
+      style={{ boxShadow: "0 6px 16px -4px rgba(255,77,109,0.45)" }}
+    >
+      <defs>
+        <linearGradient id="logoGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#FF4D6D" />
+          <stop offset="55%" stopColor="#FF8A3D" />
+          <stop offset="100%" stopColor="#FFB020" />
+        </linearGradient>
+      </defs>
+      <rect width="64" height="64" rx="16" fill="url(#logoGrad)" />
+      <path
+        d="M20 46V22a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v24"
+        fill="none"
+        stroke="#FFFFFF"
+        strokeWidth="3.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M17 46h22" stroke="#FFFFFF" strokeWidth="3.2" strokeLinecap="round" />
+      <path d="M21 30h11" stroke="#FFFFFF" strokeWidth="3.2" strokeLinecap="round" />
+      <path
+        d="M36 25l6 3.6a3 3 0 0 1 1.5 2.6V40a2.5 2.5 0 0 1-5 0v-6"
+        fill="none"
+        stroke="#FFFFFF"
+        strokeWidth="3.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M30.5 12.5l-6 9h4.6l-2.4 8.5 7.8-10.3h-4.8z" fill="#FFFFFF" />
+    </svg>
+  );
+}
+
 export default function App() {
-  const [inputCity, setInputCity] = useState("Lyon");
+  const [inputCity, setInputCity] = useState("");
   const [fuelId, setFuelId] = useState("gazole");
   const [pulse, setPulse] = useState(false);
   const [coords, setCoords] = useState(null);
@@ -134,10 +328,18 @@ export default function App() {
   const [stations, setStations] = useState([]);
   const [loadingStations, setLoadingStations] = useState(false);
   const [fetchError, setFetchError] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+  const [sortMode, setSortMode] = useState("value"); // "value" | "price" | "distance"
+  const [fillLiters, setFillLiters] = useState(DEFAULT_FILL_LITERS);
+  const [consumption, setConsumption] = useState(DEFAULT_CONSUMPTION_L_PER_100KM);
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestLoading, setSuggestLoading] = useState(false);
 
   const loadStations = useCallback(async (lat, lon) => {
     setLoadingStations(true);
     setFetchError(null);
+    setExpandedId(null);
     try {
       const results = await fetchNearbyStations(lat, lon);
       setStations(results);
@@ -148,21 +350,26 @@ export default function App() {
     }
   }, []);
 
+  // Debounced autocomplete: fetch suggestions ~300ms after the user stops typing
   useEffect(() => {
-    (async () => {
-      try {
-        const place = await geocodeCity("Lyon");
-        if (place) {
-          setCoords({ lat: place.lat, lon: place.lon });
-          setPlaceLabel(place.label);
-          loadStations(place.lat, place.lon);
-        }
-      } catch {
-        setFetchError("Impossible de contacter les services de données pour l'instant.");
+    if (!inputCity || inputCity.trim().length < 2) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    setSuggestLoading(true);
+    const t = setTimeout(async () => {
+      const results = await fetchCitySuggestions(inputCity);
+      if (!cancelled) {
+        setSuggestions(results);
+        setSuggestLoading(false);
       }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [inputCity]);
 
   useEffect(() => {
     setPulse(true);
@@ -194,16 +401,24 @@ export default function App() {
     }
   };
 
+  const goToPlace = (lat, lon, label) => {
+    setCoords({ lat, lon });
+    setPlaceLabel(label);
+    setInputCity(label);
+    setShowSuggestions(false);
+    setSuggestions([]);
+    setLocStatus("idle");
+    loadStations(lat, lon);
+  };
+
   const handleCitySearch = async (e) => {
     e.preventDefault();
-    setLocStatus("idle");
     setFetchError(null);
+    if (!inputCity.trim()) return;
     try {
-      const place = await geocodeCity(inputCity.trim() || "Lyon");
+      const place = await geocodeCity(inputCity.trim());
       if (place) {
-        setCoords({ lat: place.lat, lon: place.lon });
-        setPlaceLabel(place.label);
-        loadStations(place.lat, place.lon);
+        goToPlace(place.lat, place.lon, place.label);
       } else {
         setFetchError("Ville introuvable, essaie une autre orthographe.");
       }
@@ -214,20 +429,52 @@ export default function App() {
 
   const fuel = FUELS.find((f) => f.id === fuelId);
 
-  const sorted = useMemo(() => {
-    return [...stations].sort((a, b) => a.distance - b.distance);
-  }, [stations]);
-
-  const byPrice = useMemo(
-    () =>
-      [...stations]
-        .filter((s) => s.prices[fuelId] != null)
-        .sort((a, b) => a.prices[fuelId] - b.prices[fuelId]),
+  // Stations that actually have a price for the selected fuel
+  const withPrice = useMemo(
+    () => stations.filter((s) => s.prices[fuelId] != null),
     [stations, fuelId]
   );
-  const cheapest = byPrice[0];
-  const priciest = byPrice[byPrice.length - 1];
-  const savingsEuros = cheapest ? priciest.prices[fuelId] - cheapest.prices[fuelId] : 0;
+
+  // --- "Rentability" algorithm -------------------------------------
+  // total cost = (fuel needed to fill up * price at that station)
+  //            + (fuel burned driving there and back * price at that station)
+  // This favours cheap stations that are also close by, penalising cheap
+  // stations that are far enough away that the detour cancels the savings.
+  const withCost = useMemo(() => {
+    return withPrice.map((s) => {
+      const price = s.prices[fuelId];
+      const tripLiters = (s.distance * 2 * consumption) / 100;
+      const tripCost = tripLiters * price;
+      const fillCost = fillLiters * price;
+      return { ...s, totalCost: tripCost + fillCost, tripCost, fillCost };
+    });
+  }, [withPrice, fuelId, fillLiters, consumption]);
+
+  const cheapest = useMemo(
+    () => [...withPrice].sort((a, b) => a.prices[fuelId] - b.prices[fuelId])[0],
+    [withPrice, fuelId]
+  );
+  const priciest = useMemo(
+    () => [...withPrice].sort((a, b) => a.prices[fuelId] - b.prices[fuelId]).slice(-1)[0],
+    [withPrice, fuelId]
+  );
+  const bestValue = useMemo(
+    () => [...withCost].sort((a, b) => a.totalCost - b.totalCost)[0],
+    [withCost]
+  );
+  const savingsEuros = cheapest && priciest ? priciest.prices[fuelId] - cheapest.prices[fuelId] : 0;
+
+  const sorted = useMemo(() => {
+    const base = withCost.length ? withCost : stations;
+    const arr = [...base];
+    if (sortMode === "distance") arr.sort((a, b) => a.distance - b.distance);
+    else if (sortMode === "price") arr.sort((a, b) => a.prices[fuelId] - b.prices[fuelId]);
+    else arr.sort((a, b) => (a.totalCost ?? Infinity) - (b.totalCost ?? Infinity));
+    // stations without a price for this fuel go last, sorted by distance
+    const noPrice = stations.filter((s) => s.prices[fuelId] == null);
+    noPrice.sort((a, b) => a.distance - b.distance);
+    return [...arr, ...noPrice];
+  }, [withCost, stations, sortMode, fuelId]);
 
   return (
     <div className="min-h-screen bg-[#FFF9F2] text-[#2D1B36] font-sans relative overflow-x-hidden">
@@ -237,6 +484,10 @@ export default function App() {
         @keyframes pop-in {
           from { opacity: 0; transform: translateY(10px) scale(0.97); }
           to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes expand-in {
+          from { opacity: 0; transform: translateY(-6px); }
+          to { opacity: 1; transform: translateY(0); }
         }
         @keyframes blob-float {
           0%, 100% { transform: translate(0, 0) scale(1); }
@@ -264,15 +515,16 @@ export default function App() {
           <Zap size={12} className="text-[#FFB020]" style={{ animation: "wiggle 1.5s ease-in-out infinite" }} />
           Données officielles, mises à jour en continu
         </div>
-        <h1 className="font-display text-5xl md:text-7xl leading-[0.95] mb-3">
-          <span className="bg-clip-text text-transparent bg-gradient-to-r from-[#FF4D6D] via-[#FF8A3D] to-[#FFB020]">
-            Fais le plein
-          </span>
-          <br />
-          au meilleur prix
-        </h1>
+        <div className="flex items-center gap-4 mb-3">
+          <Logo size={52} />
+          <h1 className="font-display text-5xl md:text-7xl leading-[0.95]">
+            <span className="bg-clip-text text-transparent bg-gradient-to-r from-[#FF4D6D] via-[#FF8A3D] to-[#FFB020]">
+              Plein Futé
+            </span>
+          </h1>
+        </div>
         <p className="text-[#8A7B92] text-lg max-w-md">
-          Trouve la station la moins chère autour de toi, en un clin d'œil ✨
+          Trouve la station la plus rentable autour de toi, en un clin d'œil ✨
         </p>
       </header>
 
@@ -317,29 +569,64 @@ export default function App() {
           <div className="h-px flex-1 bg-[#F0EAE2]" />
         </div>
 
-        <form
-          onSubmit={handleCitySearch}
-          className="flex items-center gap-2 bg-white rounded-2xl px-4 py-3 shadow-[0_4px_20px_-6px_rgba(45,27,54,0.15)]"
-        >
-          <MapPin size={20} className="text-[#FF4D6D] shrink-0" />
-          <input
-            value={inputCity}
-            onChange={(e) => setInputCity(e.target.value)}
-            placeholder="Ta ville ou ton code postal"
-            className="w-full bg-transparent outline-none placeholder:text-[#C4B8C9] text-base font-medium"
-          />
-          <button
-            type="submit"
-            className="flex items-center gap-1.5 text-sm font-bold text-white px-4 py-2 rounded-xl shrink-0 transition-transform hover:scale-105 active:scale-95"
-            style={{ background: "linear-gradient(135deg, #FF4D6D, #FF8A3D)" }}
+        <div className="relative">
+          <form
+            onSubmit={handleCitySearch}
+            className="flex items-center gap-2 bg-white rounded-2xl px-4 py-3 shadow-[0_4px_20px_-6px_rgba(45,27,54,0.15)]"
           >
-            <Search size={14} /> Chercher
-          </button>
-        </form>
+            <MapPin size={20} className="text-[#FF4D6D] shrink-0" />
+            <input
+              value={inputCity}
+              onChange={(e) => {
+                setInputCity(e.target.value);
+                setShowSuggestions(true);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+              placeholder="Ta ville ou ton code postal"
+              autoComplete="off"
+              className="w-full bg-transparent outline-none placeholder:text-[#C4B8C9] text-base font-medium"
+            />
+            {suggestLoading && (
+              <Loader2 size={16} className="text-[#C4B8C9] shrink-0" style={{ animation: "spin 1s linear infinite" }} />
+            )}
+            <button
+              type="submit"
+              className="flex items-center gap-1.5 text-sm font-bold text-white px-4 py-2 rounded-xl shrink-0 transition-transform hover:scale-105 active:scale-95"
+              style={{ background: "linear-gradient(135deg, #FF4D6D, #FF8A3D)" }}
+            >
+              <Search size={14} /> Chercher
+            </button>
+          </form>
+
+          {showSuggestions && suggestions.length > 0 && (
+            <div className="absolute left-0 right-0 top-[calc(100%+6px)] bg-white rounded-2xl shadow-[0_8px_30px_-6px_rgba(45,27,54,0.25)] overflow-hidden z-10">
+              {suggestions.map((s, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => goToPlace(s.lat, s.lon, s.label)}
+                  className="w-full flex items-center gap-2 px-4 py-2.5 text-left text-sm font-medium text-[#2D1B36] hover:bg-[#FFF4EF] transition-colors"
+                >
+                  <MapPin size={14} className="text-[#C4B8C9] shrink-0" />
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         {placeLabel && (
           <p className="text-xs text-[#8A7B92] font-medium -mt-3">
             Résultats autour de <span className="font-semibold">{placeLabel}</span>
+          </p>
+        )}
+
+        {!placeLabel && !loadingStations && (
+          <p className="text-sm text-[#8A7B92] px-1">
+            Utilise la géolocalisation ou cherche une ville pour voir les
+            stations autour de toi.
           </p>
         )}
 
@@ -361,6 +648,59 @@ export default function App() {
               {f.label}
             </button>
           ))}
+        </div>
+
+        {/* Sort mode + trip assumptions */}
+        <div className="bg-white rounded-2xl p-4 space-y-3 shadow-[0_4px_20px_-6px_rgba(45,27,54,0.1)]">
+          <div className="flex items-center gap-2 text-xs font-bold text-[#8A7B92] uppercase tracking-wide">
+            <Gauge size={13} /> Trier par
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {[
+              { id: "value", label: "Rentabilité (recommandé)" },
+              { id: "price", label: "Prix au litre" },
+              { id: "distance", label: "Distance" },
+            ].map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => setSortMode(opt.id)}
+                className="px-3 py-1.5 text-xs font-bold rounded-full transition-all"
+                style={{
+                  background: sortMode === opt.id ? "#2D1B36" : "#F5F0EA",
+                  color: sortMode === opt.id ? "#FFFFFF" : "#8A7B92",
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-4 pt-1 text-xs text-[#8A7B92]">
+            <label className="flex items-center gap-1.5">
+              Plein de
+              <input
+                type="number"
+                min="1"
+                max="100"
+                value={fillLiters}
+                onChange={(e) => setFillLiters(Number(e.target.value) || 1)}
+                className="w-14 px-1.5 py-1 rounded-lg border border-[#F0EAE2] text-center font-semibold text-[#2D1B36]"
+              />
+              L
+            </label>
+            <label className="flex items-center gap-1.5">
+              Conso.
+              <input
+                type="number"
+                min="1"
+                max="30"
+                step="0.5"
+                value={consumption}
+                onChange={(e) => setConsumption(Number(e.target.value) || 1)}
+                className="w-14 px-1.5 py-1 rounded-lg border border-[#F0EAE2] text-center font-semibold text-[#2D1B36]"
+              />
+              L/100km
+            </label>
+          </div>
         </div>
 
         {fetchError && (
@@ -392,7 +732,7 @@ export default function App() {
           </div>
         )}
 
-        {!loadingStations && stations.length === 0 && !fetchError && (
+        {!loadingStations && placeLabel && stations.length === 0 && !fetchError && (
           <p className="text-sm text-[#8A7B92] px-1">
             Aucune station trouvée dans ce secteur — essaie une autre ville.
           </p>
@@ -405,7 +745,12 @@ export default function App() {
               station={station}
               fuel={fuel}
               isBest={station.id === cheapest?.id}
+              isBestValue={station.id === bestValue?.id && bestValue?.id !== cheapest?.id}
               rank={i}
+              expanded={expandedId === station.id}
+              onToggle={() =>
+                setExpandedId((cur) => (cur === station.id ? null : station.id))
+              }
             />
           ))}
         </div>
@@ -415,7 +760,8 @@ export default function App() {
         <p className="text-xs text-[#C4B8C9] font-medium">
           Données officielles issues de data.economie.gouv.fr (DGCCRF),
           actualisées toutes les 10 min. Géocodage via l'API Adresse (Base
-          Adresse Nationale). ⛽
+          Adresse Nationale). Le calcul de rentabilité est une estimation
+          basée sur ta consommation et la taille de plein renseignées. ⛽
         </p>
       </footer>
     </div>
