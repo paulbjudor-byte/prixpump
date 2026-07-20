@@ -36,7 +36,63 @@ const DEFAULT_FILL_LITERS = 40;
 
 const CARBURANTS_API =
   "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
+const BRANDS_API =
+  "https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/prix_des_carburants_j_7/records";
 const GEOCODE_API = "https://api-adresse.data.gouv.fr/search/";
+
+// Known brand accent colors (approximate, for the colored text badge only —
+// never a reproduction of the actual trademarked logo graphics).
+const BRAND_COLORS = {
+  totalenergies: "#EE2E24",
+  total: "#EE2E24",
+  intermarche: "#E2001A",
+  leclerc: "#0055A4",
+  "e.leclerc": "#0055A4",
+  carrefour: "#004E9F",
+  esso: "#00539B",
+  auchan: "#C8102E",
+  avia: "#005CA9",
+  bp: "#8FCB3B",
+  shell: "#FBCE07",
+  cora: "#E30613",
+  "systeme u": "#E2001A",
+  "super u": "#E2001A",
+  u express: "#E2001A",
+  netto: "#004F9F",
+  simply: "#00954C",
+  dyneff: "#F58220",
+  agip: "#004B87",
+  casino: "#00A0DC",
+  vito: "#F39200",
+  "les mousquetaires": "#E2001A",
+};
+
+function brandColor(brand) {
+  if (!brand) return "#2D1B36";
+  return BRAND_COLORS[brand.trim().toLowerCase()] || "#5A3D6B";
+}
+
+// Fetch brand/enseigne names for a batch of station ids from the official
+// weekly (J-7) dataset, which — unlike the live feed — includes the "brand"
+// field. Best-effort: any failure here just means no brand badge is shown,
+// the app keeps working with prices from the live feed regardless.
+async function fetchBrandsForStations(ids) {
+  if (!ids.length) return {};
+  const idList = ids.map((id) => `'${id}'`).join(",");
+  const url = `${BRANDS_API}?where=${encodeURIComponent(`id in (${idList})`)}&limit=${ids.length}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const map = {};
+    (data.results || []).forEach((r) => {
+      if (r.id && r.brand) map[String(r.id)] = r.brand;
+    });
+    return map;
+  } catch {
+    return {};
+  }
+}
 
 function distanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -166,6 +222,16 @@ function StationDetails({ station, fuel }) {
       className="px-5 pb-5 pt-1 space-y-4 rounded-b-2xl"
       style={{ animation: "expand-in 0.25s ease-out both" }}
     >
+      {station.brand && (
+        <div className="flex items-center gap-2">
+          <span
+            className="text-xs font-bold uppercase tracking-wide px-2 py-1 rounded-lg text-white"
+            style={{ background: brandColor(station.brand) }}
+          >
+            {station.brand}
+          </span>
+        </div>
+      )}
       {/* Full price table */}
       <div className="grid grid-cols-2 gap-2">
         {FUELS.map((f) => {
@@ -250,13 +316,21 @@ function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onTog
       >
         <div className="flex items-center gap-3 min-w-0">
           <div
-            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white shadow-sm"
-            style={{ background: isBest || isBestValue ? fuel.color : "#2D1B36" }}
+            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white shadow-sm font-display font-bold text-xs text-center leading-tight px-0.5"
+            style={{ background: isBest || isBestValue ? fuel.color : brandColor(station.brand) }}
           >
-            <Fuel size={18} />
+            {station.brand ? station.brand.slice(0, 3).toUpperCase() : <Fuel size={18} />}
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
+              {station.brand && (
+                <span
+                  className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-md text-white shrink-0"
+                  style={{ background: brandColor(station.brand) }}
+                >
+                  {station.brand}
+                </span>
+              )}
               <span className="font-semibold text-[#2D1B36] truncate">
                 {station.address}
               </span>
@@ -402,6 +476,24 @@ function StationsMap({ stations, coords, fuel, fuelId, cheapestId, bestValueId }
             >
               <Popup>
                 <div style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", minWidth: 160 }}>
+                  {s.brand && (
+                    <div
+                      style={{
+                        display: "inline-block",
+                        background: brandColor(s.brand),
+                        color: "white",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        padding: "2px 6px",
+                        borderRadius: 6,
+                        marginBottom: 4,
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      {s.brand}
+                    </div>
+                  )}
+                  <br />
                   <strong>{s.address}</strong>
                   <div style={{ color: "#8A7B92", fontSize: 12, marginBottom: 6 }}>
                     {s.city} · {s.distance.toFixed(1)} km
@@ -454,6 +546,13 @@ export default function App() {
     try {
       const results = await fetchNearbyStations(lat, lon);
       setStations(results);
+      // Fetch brand names in the background — non-blocking, best-effort
+      fetchBrandsForStations(results.map((s) => s.id)).then((brandMap) => {
+        if (Object.keys(brandMap).length === 0) return;
+        setStations((current) =>
+          current.map((s) => ({ ...s, brand: brandMap[String(s.id)] || null }))
+        );
+      });
     } catch (err) {
       setFetchError("Impossible de charger les prix pour l'instant. Réessaie dans un instant.");
     } finally {
