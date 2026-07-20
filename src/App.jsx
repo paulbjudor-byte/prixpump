@@ -1,4 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
+import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import L from "leaflet";
 import {
   MapPin,
   Fuel,
@@ -13,6 +15,9 @@ import {
   ChevronDown,
   TrendingUp,
   Gauge,
+  Map as MapIcon,
+  Smartphone,
+  X,
 } from "lucide-react";
 
 // ---- Config -------------------------------------------------------
@@ -54,6 +59,21 @@ async function geocodeCity(query) {
   const [lon, lat] = data.features[0].geometry.coordinates;
   const label = data.features[0].properties.label;
   return { lat, lon, label };
+}
+
+// Turn GPS coordinates back into a readable place name, so the user can see
+// exactly what location was detected (useful when laptop Wi-Fi/IP-based
+// geolocation is imprecise, unlike a phone's GPS chip).
+async function reverseGeocode(lat, lon) {
+  const url = `https://api-adresse.data.gouv.fr/reverse/?lon=${lon}&lat=${lat}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.features?.[0]?.properties?.label || null;
+  } catch {
+    return null;
+  }
 }
 
 // Fetch up to 5 city/address suggestions for the autocomplete dropdown
@@ -318,6 +338,95 @@ function Logo({ size = 44 }) {
   );
 }
 
+// Colored circle markers built with plain HTML/CSS — avoids the classic
+// Leaflet-in-a-bundler broken default icon issue entirely.
+function makeMarkerIcon(color, label, big) {
+  const size = big ? 34 : 26;
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+      width:${size}px;height:${size}px;border-radius:9999px;
+      background:${color};border:2.5px solid white;
+      box-shadow:0 2px 8px rgba(45,27,54,0.35);
+      display:flex;align-items:center;justify-content:center;
+      color:white;font-weight:700;font-size:${big ? 13 : 11}px;
+      font-family:'Plus Jakarta Sans', sans-serif;
+    ">${label}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
+}
+
+function userMarkerIcon() {
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+      width:16px;height:16px;border-radius:9999px;
+      background:#2D1B36;border:3px solid white;
+      box-shadow:0 0 0 4px rgba(45,27,54,0.25);
+    "></div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+}
+
+function StationsMap({ stations, coords, fuel, fuelId, cheapestId, bestValueId }) {
+  if (!coords) return null;
+  return (
+    <div className="rounded-2xl overflow-hidden shadow-[0_4px_20px_-6px_rgba(45,27,54,0.15)]" style={{ height: 340 }}>
+      <MapContainer
+        center={[coords.lat, coords.lon]}
+        zoom={13}
+        style={{ height: "100%", width: "100%" }}
+        scrollWheelZoom={true}
+      >
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+        <Marker position={[coords.lat, coords.lon]} icon={userMarkerIcon()}>
+          <Popup>Toi</Popup>
+        </Marker>
+        {stations.map((s) => {
+          const price = s.prices[fuelId];
+          const isBest = s.id === cheapestId || s.id === bestValueId;
+          return (
+            <Marker
+              key={s.id}
+              position={[s.lat, s.lon]}
+              icon={makeMarkerIcon(
+                isBest ? fuel.color : "#2D1B36",
+                price != null ? price.toFixed(2) : "–",
+                isBest
+              )}
+            >
+              <Popup>
+                <div style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", minWidth: 160 }}>
+                  <strong>{s.address}</strong>
+                  <div style={{ color: "#8A7B92", fontSize: 12, marginBottom: 6 }}>
+                    {s.city} · {s.distance.toFixed(1)} km
+                  </div>
+                  <div style={{ fontWeight: 700, color: fuel.color, marginBottom: 6 }}>
+                    {price != null ? `${price.toFixed(3)} € · ${fuel.label}` : "Prix indisponible"}
+                  </div>
+                  <a
+                    href={googleMapsUrl(s)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: "#FF4D6D", fontWeight: 600, fontSize: 13 }}
+                  >
+                    Itinéraire →
+                  </a>
+                </div>
+              </Popup>
+            </Marker>
+          );
+        })}
+      </MapContainer>
+    </div>
+  );
+}
+
 export default function App() {
   const [inputCity, setInputCity] = useState("");
   const [fuelId, setFuelId] = useState("gazole");
@@ -335,6 +444,8 @@ export default function App() {
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [suggestLoading, setSuggestLoading] = useState(false);
+  const [showMap, setShowMap] = useState(false);
+  const [showInstallHelp, setShowInstallHelp] = useState(false);
 
   const loadStations = useCallback(async (lat, lon) => {
     setLoadingStations(true);
@@ -377,20 +488,29 @@ export default function App() {
     return () => clearTimeout(t);
   }, [fuelId, coords]);
 
+  const [locAccuracyWarning, setLocAccuracyWarning] = useState(false);
+
   const handleLocate = () => {
     if (!("geolocation" in navigator)) {
       setLocStatus("unsupported");
       return;
     }
     setLocStatus("loading");
+    setLocAccuracyWarning(false);
     try {
       navigator.geolocation.getCurrentPosition(
-        (pos) => {
+        async (pos) => {
           const lat = pos.coords.latitude;
           const lon = pos.coords.longitude;
+          // Accuracy is in meters; large values usually mean Wi-Fi/IP based
+          // location on a laptop rather than a real GPS fix.
+          if (pos.coords.accuracy && pos.coords.accuracy > 20000) {
+            setLocAccuracyWarning(true);
+          }
           setCoords({ lat, lon });
-          setPlaceLabel("ta position actuelle");
           setLocStatus("granted");
+          const detected = await reverseGeocode(lat, lon);
+          setPlaceLabel(detected || "ta position actuelle");
           loadStations(lat, lon);
         },
         () => setLocStatus("denied"),
@@ -523,10 +643,66 @@ export default function App() {
             </span>
           </h1>
         </div>
-        <p className="text-[#8A7B92] text-lg max-w-md">
+        <p className="text-[#8A7B92] text-lg max-w-md mb-4">
           Trouve la station la plus rentable autour de toi, en un clin d'œil ✨
         </p>
+        <button
+          onClick={() => setShowInstallHelp(true)}
+          className="inline-flex items-center gap-1.5 bg-white rounded-full px-3.5 py-2 text-xs font-bold text-[#2D1B36] shadow-sm hover:scale-105 transition-transform"
+        >
+          <Smartphone size={13} className="text-[#FF4D6D]" />
+          Ajouter à l'écran d'accueil
+        </button>
       </header>
+
+      {showInstallHelp && (
+        <div
+          className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/40 px-4 pb-4 md:pb-0"
+          onClick={() => setShowInstallHelp(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setShowInstallHelp(false)}
+              className="absolute top-4 right-4 text-[#C4B8C9] hover:text-[#2D1B36]"
+            >
+              <X size={18} />
+            </button>
+            <div className="flex items-center gap-3">
+              <Logo size={40} />
+              <h3 className="font-display text-xl">Installer Plein Futé</h3>
+            </div>
+            <div className="space-y-3 text-sm">
+              <div>
+                <p className="font-bold text-[#2D1B36] mb-1">Sur iPhone (Safari)</p>
+                <p className="text-[#8A7B92] leading-relaxed">
+                  Appuie sur le bouton <strong>Partager</strong> (le carré avec
+                  une flèche vers le haut) en bas de l'écran, puis choisis{" "}
+                  <strong>"Sur l'écran d'accueil"</strong>.
+                </p>
+              </div>
+              <div>
+                <p className="font-bold text-[#2D1B36] mb-1">Sur Android (Chrome)</p>
+                <p className="text-[#8A7B92] leading-relaxed">
+                  Appuie sur le menu <strong>⋮</strong> en haut à droite, puis
+                  choisis <strong>"Ajouter à l'écran d'accueil"</strong> ou
+                  <strong>"Installer l'application"</strong>.
+                </p>
+              </div>
+              <div>
+                <p className="font-bold text-[#2D1B36] mb-1">Sur ordinateur</p>
+                <p className="text-[#8A7B92] leading-relaxed">
+                  Clique sur l'icône d'installation dans la barre d'adresse de
+                  ton navigateur (Chrome/Edge), ou le menu ⋮ → "Installer
+                  Plein Futé".
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="relative max-w-3xl mx-auto px-6 md:px-12 pb-8 space-y-6">
         <button
@@ -548,6 +724,13 @@ export default function App() {
           )}
         </button>
 
+        {locStatus === "granted" && locAccuracyWarning && (
+          <p className="text-sm text-[#FFB020] bg-[#FFB020]/10 rounded-xl px-4 py-2.5">
+            Position détectée avec une précision limitée (normal sur
+            ordinateur, sans puce GPS). Si l'endroit affiché ne correspond pas
+            à chez toi, cherche plutôt ta ville manuellement ci-dessous.
+          </p>
+        )}
         {locStatus === "denied" && (
           <p className="text-sm text-[#FF4D6D] bg-[#FF4D6D]/10 rounded-xl px-4 py-2.5">
             Localisation refusée ou indisponible ici — cherche une ville
@@ -736,6 +919,27 @@ export default function App() {
           <p className="text-sm text-[#8A7B92] px-1">
             Aucune station trouvée dans ce secteur — essaie une autre ville.
           </p>
+        )}
+
+        {!loadingStations && stations.length > 0 && (
+          <button
+            onClick={() => setShowMap((v) => !v)}
+            className="flex items-center gap-2 text-sm font-bold text-[#2D1B36] bg-white px-4 py-2.5 rounded-xl shadow-[0_2px_8px_-4px_rgba(45,27,54,0.15)] hover:scale-[1.01] transition-transform"
+          >
+            <MapIcon size={16} className="text-[#FF4D6D]" />
+            {showMap ? "Masquer la carte" : "Voir la carte"}
+          </button>
+        )}
+
+        {showMap && coords && (
+          <StationsMap
+            stations={stations}
+            coords={coords}
+            fuel={fuel}
+            fuelId={fuelId}
+            cheapestId={cheapest?.id}
+            bestValueId={bestValue?.id}
+          />
         )}
 
         <div className="space-y-2.5">
