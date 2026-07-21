@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
 import {
   MapPin,
@@ -18,6 +19,9 @@ import {
   Map as MapIcon,
   Smartphone,
   X,
+  Star,
+  Bell,
+  Check,
 } from "lucide-react";
 
 // ---- Config -------------------------------------------------------
@@ -57,7 +61,7 @@ const BRAND_COLORS = {
   cora: "#E30613",
   "systeme u": "#E2001A",
   "super u": "#E2001A",
-  u express: "#E2001A",
+  "u express": "#E2001A",
   netto: "#004F9F",
   simply: "#00954C",
   dyneff: "#F58220",
@@ -204,6 +208,44 @@ function googleMapsUrl(station) {
   return `https://www.google.com/maps/dir/?api=1&destination=${station.lat},${station.lon}`;
 }
 
+// Fetch a large sample of stations across all of France for the "national"
+// map view. Capped at ~1500 stations (15 pages of 100) to keep the map and
+// the browser responsive — plenty for a visual overview with clustering.
+const FRANCE_MAP_CAP = 1500;
+const FRANCE_PAGE_SIZE = 100;
+
+async function fetchAllFranceStations() {
+  const all = [];
+  let offset = 0;
+  while (all.length < FRANCE_MAP_CAP) {
+    const url = `${CARBURANTS_API}?limit=${FRANCE_PAGE_SIZE}&offset=${offset}`;
+    const res = await fetch(url);
+    if (!res.ok) break;
+    const data = await res.json();
+    const batch = (data.results || []).filter((r) => r.geom);
+    if (batch.length === 0) break;
+    all.push(
+      ...batch.map((r) => ({
+        id: r.id,
+        address: r.adresse || "Adresse non renseignée",
+        city: r.ville || "",
+        lat: r.geom.lat,
+        lon: r.geom.lon,
+        prices: {
+          gazole: r.gazole_prix ?? null,
+          sp95: r.sp95_prix ?? null,
+          e10: r.e10_prix ?? null,
+          sp98: r.sp98_prix ?? null,
+          e85: r.e85_prix ?? null,
+        },
+      }))
+    );
+    offset += FRANCE_PAGE_SIZE;
+    if (batch.length < FRANCE_PAGE_SIZE) break; // reached the end
+  }
+  return all;
+}
+
 function PriceBadge({ value, color, big }) {
   return (
     <span
@@ -293,7 +335,7 @@ function StationDetails({ station, fuel }) {
   );
 }
 
-function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onToggle }) {
+function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onToggle, isFavorite, onToggleFavorite }) {
   const price = station.prices[fuel.id];
   return (
     <div
@@ -309,64 +351,81 @@ function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onTog
         animation: `pop-in 0.4s ease-out ${Math.min(rank, 8) * 0.06}s both`,
       }}
     >
-      <button
-        type="button"
-        onClick={onToggle}
-        className="w-full flex items-center justify-between gap-3 px-5 py-4 text-left hover:-translate-y-0 transition-transform"
-      >
-        <div className="flex items-center gap-3 min-w-0">
-          <div
-            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white shadow-sm font-display font-bold text-xs text-center leading-tight px-0.5"
-            style={{ background: isBest || isBestValue ? fuel.color : brandColor(station.brand) }}
-          >
-            {station.brand ? station.brand.slice(0, 3).toUpperCase() : <Fuel size={18} />}
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {station.brand && (
-                <span
-                  className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-md text-white shrink-0"
-                  style={{ background: brandColor(station.brand) }}
-                >
-                  {station.brand}
-                </span>
-              )}
-              <span className="font-semibold text-[#2D1B36] truncate">
-                {station.address}
-              </span>
-              {isBest && (
-                <span
-                  className="flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full text-white shrink-0"
-                  style={{ background: fuel.color }}
-                >
-                  <Sparkles size={10} /> Moins cher
-                </span>
-              )}
-              {isBestValue && (
-                <span className="flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full text-white shrink-0 bg-[#2D1B36]">
-                  <TrendingUp size={10} /> Le plus rentable
-                </span>
-              )}
+      <div className="w-full flex items-center gap-1 pr-3">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex-1 flex items-center justify-between gap-3 px-5 py-4 text-left min-w-0"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div
+              className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white shadow-sm font-display font-bold text-xs text-center leading-tight px-0.5"
+              style={{ background: isBest || isBestValue ? fuel.color : brandColor(station.brand) }}
+            >
+              {station.brand ? station.brand.slice(0, 3).toUpperCase() : <Fuel size={18} />}
             </div>
-            <p className="text-xs text-[#8A7B92] truncate flex items-center gap-1">
-              <Navigation size={10} /> {station.distance.toFixed(1)} km ·{" "}
-              {station.city}
-            </p>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {station.brand && (
+                  <span
+                    className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-md text-white shrink-0"
+                    style={{ background: brandColor(station.brand) }}
+                  >
+                    {station.brand}
+                  </span>
+                )}
+                <span className="font-semibold text-[#2D1B36] truncate">
+                  {station.address}
+                </span>
+                {isBest && (
+                  <span
+                    className="flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full text-white shrink-0"
+                    style={{ background: fuel.color }}
+                  >
+                    <Sparkles size={10} /> Moins cher
+                  </span>
+                )}
+                {isBestValue && (
+                  <span className="flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full text-white shrink-0 bg-[#2D1B36]">
+                    <TrendingUp size={10} /> Le plus rentable
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-[#8A7B92] truncate flex items-center gap-1">
+                <Navigation size={10} /> {station.distance.toFixed(1)} km ·{" "}
+                {station.city}
+              </p>
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {price != null ? (
-            <PriceBadge value={price} color={isBest || isBestValue ? fuel.color : "#2D1B36"} big={isBest || isBestValue} />
-          ) : (
-            <span className="text-xs text-[#C4B8C9] font-medium">Indispo.</span>
-          )}
-          <ChevronDown
-            size={18}
-            className="text-[#C4B8C9] transition-transform duration-200"
-            style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }}
+          <div className="flex items-center gap-2 shrink-0">
+            {price != null ? (
+              <PriceBadge value={price} color={isBest || isBestValue ? fuel.color : "#2D1B36"} big={isBest || isBestValue} />
+            ) : (
+              <span className="text-xs text-[#C4B8C9] font-medium">Indispo.</span>
+            )}
+            <ChevronDown
+              size={18}
+              className="text-[#C4B8C9] transition-transform duration-200"
+              style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }}
+            />
+          </div>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFavorite(station.id);
+          }}
+          className="shrink-0 p-1.5 rounded-full hover:scale-110 transition-transform"
+          aria-label="Ajouter aux favoris"
+        >
+          <Star
+            size={20}
+            fill={isFavorite ? "#FFB020" : "none"}
+            color={isFavorite ? "#FFB020" : "#C4B8C9"}
           />
-        </div>
-      </button>
+        </button>
+      </div>
       {expanded && <StationDetails station={station} fuel={fuel} />}
     </div>
   );
@@ -444,77 +503,103 @@ function userMarkerIcon() {
   });
 }
 
-function StationsMap({ stations, coords, fuel, fuelId, cheapestId, bestValueId }) {
-  if (!coords) return null;
+function StationsMap({ stations, coords, fuel, fuelId, cheapestId, bestValueId, mapScope, franceStations, franceLoading }) {
+  if (!coords && mapScope === "nearby") return null;
+  const center = coords ? [coords.lat, coords.lon] : [46.6, 2.4];
+  const zoom = mapScope === "france" ? 6 : 13;
+
   return (
-    <div className="rounded-2xl overflow-hidden shadow-[0_4px_20px_-6px_rgba(45,27,54,0.15)]" style={{ height: 340 }}>
-      <MapContainer
-        center={[coords.lat, coords.lon]}
-        zoom={13}
-        style={{ height: "100%", width: "100%" }}
-        scrollWheelZoom={true}
-      >
+    <div className="rounded-2xl overflow-hidden shadow-[0_4px_20px_-6px_rgba(45,27,54,0.15)] relative" style={{ height: 340 }}>
+      {mapScope === "france" && franceLoading && (
+        <div className="absolute inset-0 z-[1000] bg-white/80 flex items-center justify-center gap-2 text-sm font-semibold text-[#8A7B92]">
+          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+          Chargement des stations de France…
+        </div>
+      )}
+      <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} scrollWheelZoom={true}>
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
-        <Marker position={[coords.lat, coords.lon]} icon={userMarkerIcon()}>
-          <Popup>Toi</Popup>
-        </Marker>
-        {stations.map((s) => {
-          const price = s.prices[fuelId];
-          const isBest = s.id === cheapestId || s.id === bestValueId;
-          return (
-            <Marker
-              key={s.id}
-              position={[s.lat, s.lon]}
-              icon={makeMarkerIcon(
-                isBest ? fuel.color : "#2D1B36",
-                price != null ? price.toFixed(2) : "–",
-                isBest
-              )}
-            >
-              <Popup>
-                <div style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", minWidth: 160 }}>
-                  {s.brand && (
-                    <div
-                      style={{
-                        display: "inline-block",
-                        background: brandColor(s.brand),
-                        color: "white",
-                        fontSize: 10,
-                        fontWeight: 700,
-                        padding: "2px 6px",
-                        borderRadius: 6,
-                        marginBottom: 4,
-                        textTransform: "uppercase",
-                      }}
-                    >
-                      {s.brand}
-                    </div>
-                  )}
-                  <br />
-                  <strong>{s.address}</strong>
-                  <div style={{ color: "#8A7B92", fontSize: 12, marginBottom: 6 }}>
-                    {s.city} · {s.distance.toFixed(1)} km
-                  </div>
-                  <div style={{ fontWeight: 700, color: fuel.color, marginBottom: 6 }}>
-                    {price != null ? `${price.toFixed(3)} € · ${fuel.label}` : "Prix indisponible"}
-                  </div>
-                  <a
-                    href={googleMapsUrl(s)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: "#FF4D6D", fontWeight: 600, fontSize: 13 }}
-                  >
-                    Itinéraire →
-                  </a>
-                </div>
-              </Popup>
-            </Marker>
-          );
-        })}
+        {coords && (
+          <Marker position={[coords.lat, coords.lon]} icon={userMarkerIcon()}>
+            <Popup>Toi</Popup>
+          </Marker>
+        )}
+
+        {mapScope === "nearby" &&
+          stations.map((s) => {
+            const price = s.prices[fuelId];
+            const isBest = s.id === cheapestId || s.id === bestValueId;
+            return (
+              <Marker
+                key={s.id}
+                position={[s.lat, s.lon]}
+                icon={makeMarkerIcon(isBest ? fuel.color : "#2D1B36", price != null ? price.toFixed(2) : "–", isBest)}
+              >
+                <Popup>
+                  <StationPopupContent station={s} fuel={fuel} />
+                </Popup>
+              </Marker>
+            );
+          })}
+
+        {mapScope === "france" && (
+          <MarkerClusterGroup chunkedLoading maxClusterRadius={60}>
+            {franceStations.map((s) => {
+              const price = s.prices[fuelId];
+              return (
+                <Marker
+                  key={s.id}
+                  position={[s.lat, s.lon]}
+                  icon={makeMarkerIcon("#5A3D6B", price != null ? price.toFixed(2) : "–", false)}
+                >
+                  <Popup>
+                    <StationPopupContent station={s} fuel={fuel} />
+                  </Popup>
+                </Marker>
+              );
+            })}
+          </MarkerClusterGroup>
+        )}
       </MapContainer>
+    </div>
+  );
+}
+
+function StationPopupContent({ station: s, fuel }) {
+  const price = s.prices[fuel.id];
+  return (
+    <div style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", minWidth: 160 }}>
+      {s.brand && (
+        <div
+          style={{
+            display: "inline-block",
+            background: brandColor(s.brand),
+            color: "white",
+            fontSize: 10,
+            fontWeight: 700,
+            padding: "2px 6px",
+            borderRadius: 6,
+            marginBottom: 4,
+            textTransform: "uppercase",
+          }}
+        >
+          {s.brand}
+        </div>
+      )}
+      <br />
+      <strong>{s.address}</strong>
+      <div style={{ color: "#8A7B92", fontSize: 12, marginBottom: 6 }}>
+        {s.city}
+        {s.distance != null ? ` · ${s.distance.toFixed(1)} km` : ""}
+      </div>
+      <div style={{ fontWeight: 700, color: fuel.color, marginBottom: 6 }}>
+        {price != null ? `${price.toFixed(3)} € · ${fuel.label}` : "Prix indisponible"}
+      </div>
+      <a href={googleMapsUrl(s)} target="_blank" rel="noopener noreferrer" style={{ color: "#FF4D6D", fontWeight: 600, fontSize: 13 }}>
+        Itinéraire →
+      </a>
     </div>
   );
 }
@@ -538,6 +623,47 @@ export default function App() {
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [showMap, setShowMap] = useState(false);
   const [showInstallHelp, setShowInstallHelp] = useState(false);
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      const raw = localStorage.getItem("pleinfute_favorites");
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+  const [mapScope, setMapScope] = useState("nearby"); // "nearby" | "france"
+  const [franceStations, setFranceStations] = useState([]);
+  const [franceLoading, setFranceLoading] = useState(false);
+  const [franceLoaded, setFranceLoaded] = useState(false);
+  const [showPremiumModal, setShowPremiumModal] = useState(false);
+  const [premiumEmail, setPremiumEmail] = useState("");
+  const [premiumSubmitted, setPremiumSubmitted] = useState(false);
+
+  const toggleFavorite = useCallback((id) => {
+    setFavorites((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      try {
+        localStorage.setItem("pleinfute_favorites", JSON.stringify([...next]));
+      } catch {
+        // storage unavailable — favorites just won't persist across visits
+      }
+      return next;
+    });
+  }, []);
+
+  const loadFranceStations = useCallback(async () => {
+    if (franceLoaded || franceLoading) return;
+    setFranceLoading(true);
+    try {
+      const results = await fetchAllFranceStations();
+      setFranceStations(results);
+      setFranceLoaded(true);
+    } finally {
+      setFranceLoading(false);
+    }
+  }, [franceLoaded, franceLoading]);
 
   const loadStations = useCallback(async (lat, lon) => {
     setLoadingStations(true);
@@ -752,7 +878,82 @@ export default function App() {
           <Smartphone size={13} className="text-[#FF4D6D]" />
           Ajouter à l'écran d'accueil
         </button>
+        <button
+          onClick={() => setShowPremiumModal(true)}
+          className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:scale-105 transition-transform ml-2"
+          style={{ background: "linear-gradient(135deg, #2D1B36, #5A3D6B)" }}
+        >
+          <Bell size={13} className="text-[#FFB020]" />
+          Premium — 1,99€/mois
+        </button>
       </header>
+
+      {showPremiumModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/40 px-4 pb-4 md:pb-0"
+          onClick={() => setShowPremiumModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setShowPremiumModal(false)}
+              className="absolute top-4 right-4 text-[#C4B8C9] hover:text-[#2D1B36]"
+            >
+              <X size={18} />
+            </button>
+            <div className="flex items-center gap-2">
+              <Bell size={20} className="text-[#FFB020]" />
+              <h3 className="font-display text-xl">Plein Futé Premium</h3>
+            </div>
+            <p className="text-sm text-[#8A7B92] leading-relaxed">
+              Reçois une notification dès que le prix baisse dans une de tes
+              stations <Star size={12} className="inline text-[#FFB020]" fill="#FFB020" /> favorites.
+              Plus besoin de vérifier toi-même.
+            </p>
+            <div className="bg-[#FFF4EF] rounded-xl p-4 flex items-baseline gap-1">
+              <span className="font-display text-3xl text-[#2D1B36]">1,99€</span>
+              <span className="text-sm text-[#8A7B92]">/ mois</span>
+            </div>
+            {!premiumSubmitted ? (
+              <>
+                <p className="text-xs text-[#8A7B92]">
+                  Cette fonctionnalité n'est pas encore active. Laisse ton
+                  email pour être prévenu du lancement :
+                </p>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (premiumEmail.trim()) setPremiumSubmitted(true);
+                  }}
+                  className="flex items-center gap-2"
+                >
+                  <input
+                    type="email"
+                    required
+                    value={premiumEmail}
+                    onChange={(e) => setPremiumEmail(e.target.value)}
+                    placeholder="ton@email.com"
+                    className="flex-1 min-w-0 px-3 py-2.5 rounded-xl border border-[#F0EAE2] outline-none text-sm"
+                  />
+                  <button
+                    type="submit"
+                    className="shrink-0 text-sm font-bold text-white px-4 py-2.5 rounded-xl"
+                    style={{ background: "linear-gradient(135deg, #FF4D6D, #FF8A3D)" }}
+                  >
+                    Prévenez-moi
+                  </button>
+                </form>
+              </>
+            ) : (
+              <p className="flex items-center gap-2 text-sm font-semibold text-[#00C896]">
+                <Check size={16} /> Merci, on te préviendra !
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {showInstallHelp && (
         <div
@@ -1030,15 +1231,50 @@ export default function App() {
           </button>
         )}
 
-        {showMap && coords && (
-          <StationsMap
-            stations={stations}
-            coords={coords}
-            fuel={fuel}
-            fuelId={fuelId}
-            cheapestId={cheapest?.id}
-            bestValueId={bestValue?.id}
-          />
+        {showMap && (
+          <>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setMapScope("nearby")}
+                className="px-3 py-1.5 text-xs font-bold rounded-full transition-all"
+                style={{
+                  background: mapScope === "nearby" ? "#2D1B36" : "#F5F0EA",
+                  color: mapScope === "nearby" ? "#FFFFFF" : "#8A7B92",
+                }}
+              >
+                Autour de moi
+              </button>
+              <button
+                onClick={() => {
+                  setMapScope("france");
+                  loadFranceStations();
+                }}
+                className="px-3 py-1.5 text-xs font-bold rounded-full transition-all"
+                style={{
+                  background: mapScope === "france" ? "#2D1B36" : "#F5F0EA",
+                  color: mapScope === "france" ? "#FFFFFF" : "#8A7B92",
+                }}
+              >
+                Toute la France
+              </button>
+            </div>
+            <StationsMap
+              stations={stations}
+              coords={coords}
+              fuel={fuel}
+              fuelId={fuelId}
+              cheapestId={cheapest?.id}
+              bestValueId={bestValue?.id}
+              mapScope={mapScope}
+              franceStations={franceStations}
+              franceLoading={franceLoading}
+            />
+            {mapScope === "france" && (
+              <p className="text-xs text-[#8A7B92] -mt-3">
+                Échantillon de {FRANCE_MAP_CAP} stations affiché pour garder la carte fluide.
+              </p>
+            )}
+          </>
         )}
 
         <div className="space-y-2.5">
@@ -1054,6 +1290,8 @@ export default function App() {
               onToggle={() =>
                 setExpandedId((cur) => (cur === station.id ? null : station.id))
               }
+              isFavorite={favorites.has(station.id)}
+              onToggleFavorite={toggleFavorite}
             />
           ))}
         </div>
