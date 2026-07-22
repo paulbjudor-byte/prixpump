@@ -1,6 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
-import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
 import {
   MapPin,
@@ -178,7 +177,7 @@ function parseHoraires(rawHoraires, automate2424) {
   }
 }
 
-async function fetchNearbyStations(lat, lon, radiusKm = 15, limit = 20) {
+async function fetchNearbyStations(lat, lon, radiusKm = 20, limit = 100) {
   const where = `distance(geom, geom'POINT(${lon} ${lat})', ${radiusKm}km)`;
   const url = `${CARBURANTS_API}?where=${encodeURIComponent(where)}&limit=${limit}`;
   const res = await fetch(url);
@@ -211,7 +210,7 @@ function googleMapsUrl(station) {
 // Fetch a large sample of stations across all of France for the "national"
 // map view. Capped at ~1500 stations (15 pages of 100) to keep the map and
 // the browser responsive — plenty for a visual overview with clustering.
-const FRANCE_MAP_CAP = 1500;
+const FRANCE_MAP_CAP = 4000;
 const FRANCE_PAGE_SIZE = 100;
 
 async function fetchAllFranceStations() {
@@ -503,6 +502,50 @@ function userMarkerIcon() {
   });
 }
 
+// Group a large list of stations into geographic grid cells so the national
+// map stays fast and readable, instead of rendering thousands of individual
+// pins. Each cell shows how many stations it contains and their average
+// price for the selected fuel.
+function binStationsForMap(stations, fuelId, cellSizeDeg = 0.4) {
+  const cells = new Map();
+  stations.forEach((s) => {
+    const price = s.prices[fuelId];
+    const cellLat = Math.round(s.lat / cellSizeDeg) * cellSizeDeg;
+    const cellLon = Math.round(s.lon / cellSizeDeg) * cellSizeDeg;
+    const key = `${cellLat.toFixed(2)},${cellLon.toFixed(2)}`;
+    if (!cells.has(key)) {
+      cells.set(key, { lat: cellLat, lon: cellLon, count: 0, priceSum: 0, priceCount: 0 });
+    }
+    const cell = cells.get(key);
+    cell.count += 1;
+    if (price != null) {
+      cell.priceSum += price;
+      cell.priceCount += 1;
+    }
+  });
+  return [...cells.values()].map((c) => ({
+    ...c,
+    avgPrice: c.priceCount > 0 ? c.priceSum / c.priceCount : null,
+  }));
+}
+
+function clusterMarkerIcon(count) {
+  const size = Math.min(52, 22 + Math.sqrt(count) * 6);
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+      width:${size}px;height:${size}px;border-radius:9999px;
+      background:#5A3D6B;border:2.5px solid white;
+      box-shadow:0 2px 10px rgba(45,27,54,0.4);
+      display:flex;align-items:center;justify-content:center;
+      color:white;font-weight:700;font-size:${size > 36 ? 13 : 11}px;
+      font-family:'Plus Jakarta Sans', sans-serif;
+    ">${count}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
+}
+
 function StationsMap({ stations, coords, fuel, fuelId, cheapestId, bestValueId, mapScope, franceStations, franceLoading }) {
   if (!coords && mapScope === "nearby") return null;
   const center = coords ? [coords.lat, coords.lon] : [46.6, 2.4];
@@ -544,24 +587,23 @@ function StationsMap({ stations, coords, fuel, fuelId, cheapestId, bestValueId, 
             );
           })}
 
-        {mapScope === "france" && (
-          <MarkerClusterGroup chunkedLoading maxClusterRadius={60}>
-            {franceStations.map((s) => {
-              const price = s.prices[fuelId];
-              return (
-                <Marker
-                  key={s.id}
-                  position={[s.lat, s.lon]}
-                  icon={makeMarkerIcon("#5A3D6B", price != null ? price.toFixed(2) : "–", false)}
-                >
-                  <Popup>
-                    <StationPopupContent station={s} fuel={fuel} />
-                  </Popup>
-                </Marker>
-              );
-            })}
-          </MarkerClusterGroup>
-        )}
+        {mapScope === "france" && (() => {
+          const cells = binStationsForMap(franceStations, fuelId);
+          return cells.map((c, i) => (
+            <Marker key={i} position={[c.lat, c.lon]} icon={clusterMarkerIcon(c.count)}>
+              <Popup>
+                <div style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                  <strong>{c.count} station{c.count > 1 ? "s" : ""}</strong> dans ce secteur
+                  <div style={{ color: "#8A7B92", fontSize: 12, marginTop: 4 }}>
+                    {c.avgPrice != null
+                      ? `Prix moyen ${fuel.label} : ${c.avgPrice.toFixed(3)} €`
+                      : "Pas de prix disponible pour ce carburant ici"}
+                  </div>
+                </div>
+              </Popup>
+            </Marker>
+          ));
+        })()}
       </MapContainer>
     </div>
   );
