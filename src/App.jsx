@@ -680,6 +680,33 @@ export default function App() {
   const [showPremiumModal, setShowPremiumModal] = useState(false);
   const [premiumEmail, setPremiumEmail] = useState("");
   const [premiumSubmitted, setPremiumSubmitted] = useState(false);
+  const [premiumLoading, setPremiumLoading] = useState(false);
+  const [premiumError, setPremiumError] = useState(null);
+
+  const handlePremiumSubscribe = async (e) => {
+    e.preventDefault();
+    if (!premiumEmail.trim()) return;
+    setPremiumLoading(true);
+    setPremiumError(null);
+    try {
+      const res = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: premiumEmail.trim() }),
+      });
+      const data = await res.json();
+      if (data.url) {
+        setPremiumSubmitted(true);
+        window.location.href = data.url;
+      } else {
+        setPremiumError("Impossible de démarrer le paiement pour l'instant.");
+      }
+    } catch {
+      setPremiumError("Impossible de contacter le service de paiement.");
+    } finally {
+      setPremiumLoading(false);
+    }
+  };
 
   const toggleFavorite = useCallback((id) => {
     setFavorites((current) => {
@@ -726,6 +753,12 @@ export default function App() {
     } finally {
       setLoadingStations(false);
     }
+  }, []);
+
+  // Show the premium offer shortly after the site loads
+  useEffect(() => {
+    const t = setTimeout(() => setShowPremiumModal(true), 900);
+    return () => clearTimeout(t);
   }, []);
 
   // Debounced autocomplete: fetch suggestions ~300ms after the user stops typing
@@ -961,14 +994,11 @@ export default function App() {
             {!premiumSubmitted ? (
               <>
                 <p className="text-xs text-[#8A7B92]">
-                  Cette fonctionnalité n'est pas encore active. Laisse ton
-                  email pour être prévenu du lancement :
+                  Ton email sert à créer ton abonnement et à t'envoyer les
+                  alertes de prix :
                 </p>
                 <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (premiumEmail.trim()) setPremiumSubmitted(true);
-                  }}
+                  onSubmit={handlePremiumSubscribe}
                   className="flex items-center gap-2"
                 >
                   <input
@@ -981,16 +1011,20 @@ export default function App() {
                   />
                   <button
                     type="submit"
-                    className="shrink-0 text-sm font-bold text-white px-4 py-2.5 rounded-xl"
+                    disabled={premiumLoading}
+                    className="shrink-0 text-sm font-bold text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
                     style={{ background: "linear-gradient(135deg, #FF4D6D, #FF8A3D)" }}
                   >
-                    Prévenez-moi
+                    {premiumLoading ? "…" : "S'abonner"}
                   </button>
                 </form>
+                {premiumError && (
+                  <p className="text-xs text-[#FF4D6D]">{premiumError}</p>
+                )}
               </>
             ) : (
               <p className="flex items-center gap-2 text-sm font-semibold text-[#00C896]">
-                <Check size={16} /> Merci, on te préviendra !
+                <Check size={16} /> Redirection vers le paiement…
               </p>
             )}
           </div>
