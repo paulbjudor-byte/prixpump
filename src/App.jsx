@@ -21,6 +21,7 @@ import {
   Star,
   Bell,
   Check,
+  UserRound,
 } from "lucide-react";
 
 // ---- Config -------------------------------------------------------
@@ -682,6 +683,57 @@ export default function App() {
   const [premiumSubmitted, setPremiumSubmitted] = useState(false);
   const [premiumLoading, setPremiumLoading] = useState(false);
   const [premiumError, setPremiumError] = useState(null);
+  const [account, setAccount] = useState(null); // { email, isPremium } | null
+  const [accountChecked, setAccountChecked] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authStatus, setAuthStatus] = useState("idle"); // idle | sending | sent | error
+
+  // Check for an existing session on load, and adopt server-saved favorites
+  // (a logged-in account is the source of truth for favorites/premium status)
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/me");
+        const data = await res.json();
+        if (data.loggedIn) {
+          setAccount({ email: data.email, isPremium: data.isPremium });
+          if (data.favorites?.stationIds?.length) {
+            setFavorites(new Set(data.favorites.stationIds));
+          }
+        }
+      } catch {
+        // not logged in / offline — the site still works fully anonymously
+      } finally {
+        setAccountChecked(true);
+      }
+    })();
+  }, []);
+
+  const handleAuthRequest = async (e) => {
+    e.preventDefault();
+    if (!authEmail.trim()) return;
+    setAuthStatus("sending");
+    try {
+      const res = await fetch("/api/auth-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail.trim() }),
+      });
+      setAuthStatus(res.ok ? "sent" : "error");
+    } catch {
+      setAuthStatus("error");
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/logout", { method: "POST" });
+    } catch {
+      // ignore — we clear local state regardless
+    }
+    setAccount(null);
+  };
 
   const handlePremiumSubscribe = async (e) => {
     e.preventDefault();
@@ -718,9 +770,18 @@ export default function App() {
       } catch {
         // storage unavailable — favorites just won't persist across visits
       }
+      if (account?.email) {
+        fetch("/api/save-favorites", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stationIds: [...next], fuelId }),
+        }).catch(() => {
+          // best-effort sync — favorites still work locally if this fails
+        });
+      }
       return next;
     });
-  }, []);
+  }, [account, fuelId]);
 
   const loadFranceStations = useCallback(async () => {
     if (franceLoaded || franceLoading) return;
@@ -755,11 +816,17 @@ export default function App() {
     }
   }, []);
 
-  // Show the premium offer shortly after the site loads
+  // Show the premium offer shortly after the site loads — but not if the
+  // account is already known to be premium
   useEffect(() => {
+    if (account?.isPremium) return;
     const t = setTimeout(() => setShowPremiumModal(true), 900);
     return () => clearTimeout(t);
-  }, []);
+  }, [account]);
+
+  useEffect(() => {
+    if (account?.email) setPremiumEmail(account.email);
+  }, [account]);
 
   // Debounced autocomplete: fetch suggestions ~300ms after the user stops typing
   useEffect(() => {
@@ -961,7 +1028,82 @@ export default function App() {
           <Bell size={13} className="text-[#FFB020]" />
           Premium — 1,99€/mois
         </button>
+        {accountChecked && (
+          account ? (
+            <button
+              onClick={handleLogout}
+              className="inline-flex items-center gap-1.5 bg-white rounded-full px-3.5 py-2 text-xs font-bold text-[#2D1B36] shadow-sm hover:scale-105 transition-transform ml-2"
+              title={account.email}
+            >
+              <UserRound size={13} className="text-[#00C896]" />
+              {account.isPremium && "⭐ "}
+              Se déconnecter
+            </button>
+          ) : (
+            <button
+              onClick={() => setShowAuthModal(true)}
+              className="inline-flex items-center gap-1.5 bg-white rounded-full px-3.5 py-2 text-xs font-bold text-[#2D1B36] shadow-sm hover:scale-105 transition-transform ml-2"
+            >
+              <UserRound size={13} className="text-[#5A3D6B]" />
+              Se connecter
+            </button>
+          )
+        )}
       </header>
+
+      {showAuthModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/40 px-4 pb-4 md:pb-0"
+          onClick={() => setShowAuthModal(false)}
+        >
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 relative" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setShowAuthModal(false)}
+              className="absolute top-4 right-4 text-[#C4B8C9] hover:text-[#2D1B36]"
+            >
+              <X size={18} />
+            </button>
+            <div className="flex items-center gap-2">
+              <UserRound size={20} className="text-[#5A3D6B]" />
+              <h3 className="font-display text-xl">Se connecter</h3>
+            </div>
+            <p className="text-sm text-[#8A7B92] leading-relaxed">
+              Pas de mot de passe à retenir : entre ton email, on t'envoie un
+              lien de connexion. Tes favoris et ton abonnement Premium te
+              suivront sur tous tes appareils.
+            </p>
+            {authStatus !== "sent" ? (
+              <form onSubmit={handleAuthRequest} className="flex items-center gap-2">
+                <input
+                  type="email"
+                  required
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="ton@email.com"
+                  className="flex-1 min-w-0 px-3 py-2.5 rounded-xl border border-[#F0EAE2] outline-none text-sm"
+                />
+                <button
+                  type="submit"
+                  disabled={authStatus === "sending"}
+                  className="shrink-0 text-sm font-bold text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
+                  style={{ background: "linear-gradient(135deg, #5A3D6B, #2D1B36)" }}
+                >
+                  {authStatus === "sending" ? "…" : "Envoyer le lien"}
+                </button>
+              </form>
+            ) : (
+              <p className="flex items-center gap-2 text-sm font-semibold text-[#00C896]">
+                <Check size={16} /> Lien envoyé ! Vérifie ta boîte mail.
+              </p>
+            )}
+            {authStatus === "error" && (
+              <p className="text-xs text-[#FF4D6D]">
+                Impossible d'envoyer l'email pour l'instant, réessaie.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {showPremiumModal && (
         <div

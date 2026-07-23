@@ -42,9 +42,9 @@ export default async function handler(req, res) {
   let notified = 0;
 
   for (const email of subscribers) {
-    const raw = await kv.get(`watch:${email}`);
+    const raw = await kv.get(`favorites:${email}`);
     if (!raw) continue;
-    const { stationIds, fuelId } = JSON.parse(raw);
+    const { stationIds, fuelId } = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!stationIds?.length) continue;
 
     const prices = await fetchPricesForIds(stationIds);
