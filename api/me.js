@@ -16,7 +16,11 @@ export default async function handler(req, res) {
 
   const isPremium = await kv.sismember("premium_subscribers", email);
   const raw = await kv.get(`favorites:${email}`);
-  const favorites = raw ? (typeof raw === "string" ? JSON.parse(raw) : raw) : { stationIds: [], fuelId: "gazole" };
+  const favorites = raw
+    ? (typeof raw === "string" ? JSON.parse(raw) : raw)
+    : { stations: [], fuelId: "gazole", fillLiters: 40 };
+  const savingsRaw = await kv.get(`savings:${email}`);
+  const savings = savingsRaw != null ? Number(savingsRaw) : 0;
 
-  res.status(200).json({ loggedIn: true, email, isPremium: !!isPremium, favorites });
+  res.status(200).json({ loggedIn: true, email, isPremium: !!isPremium, favorites, savings });
 }
