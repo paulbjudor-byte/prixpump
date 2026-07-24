@@ -37,6 +37,7 @@ const FUELS = [
 // driving to a station further away — adjustable by the user in the UI.
 const DEFAULT_CONSUMPTION_L_PER_100KM = 6;
 const DEFAULT_FILL_LITERS = 40;
+const FREE_FAVORITES_LIMIT = 3;
 
 const CARBURANTS_API =
   "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
@@ -258,7 +259,65 @@ function PriceBadge({ value, color, big }) {
   );
 }
 
-function StationDetails({ station, fuel }) {
+function PriceHistoryChart({ stationId, fuelId, color }) {
+  const [points, setPoints] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/price-history?stationId=${stationId}&fuelId=${fuelId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (!cancelled) setPoints(data.points || []);
+      })
+      .catch(() => {
+        if (!cancelled) setPoints([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stationId, fuelId]);
+
+  if (points === null) {
+    return <p className="text-xs text-[#C4B8C9]">Chargement de l'historique…</p>;
+  }
+  if (points.length < 2) {
+    return (
+      <p className="text-xs text-[#C4B8C9]">
+        Historique en cours de constitution — reviens dans quelques jours pour
+        voir l'évolution du prix ici.
+      </p>
+    );
+  }
+
+  const prices = points.map((p) => p.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || 0.01;
+  const w = 260;
+  const h = 60;
+  const step = w / (points.length - 1);
+  const path = points
+    .map((p, i) => {
+      const x = i * step;
+      const y = h - ((p.price - min) / range) * (h - 10) - 5;
+      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h}>
+        <path d={path} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <div className="flex justify-between text-[10px] text-[#8A7B92] mt-1">
+        <span>{points[0].date}</span>
+        <span>{points[points.length - 1].date}</span>
+      </div>
+    </div>
+  );
+}
+
+function StationDetails({ station, fuel, isPremium }) {
   return (
     <div
       className="px-5 pb-5 pt-1 space-y-4 rounded-b-2xl"
@@ -293,6 +352,20 @@ function StationDetails({ station, fuel }) {
             </div>
           );
         })}
+      </div>
+
+      {/* Price history — Premium feature */}
+      <div>
+        <p className="text-xs font-bold text-[#8A7B92] uppercase tracking-wide mb-1.5">
+          Historique du prix
+        </p>
+        {isPremium ? (
+          <PriceHistoryChart stationId={station.id} fuelId={fuel.id} color={fuel.color} />
+        ) : (
+          <p className="text-xs text-[#C4B8C9] flex items-center gap-1">
+            🔒 Débloque l'historique des prix avec Premium
+          </p>
+        )}
       </div>
 
       {/* Opening hours */}
@@ -335,7 +408,7 @@ function StationDetails({ station, fuel }) {
   );
 }
 
-function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onToggle, isFavorite, onToggleFavorite }) {
+function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onToggle, isFavorite, onToggleFavorite, isPremium }) {
   const price = station.prices[fuel.id];
   return (
     <div
@@ -426,7 +499,7 @@ function StationCard({ station, fuel, isBest, isBestValue, rank, expanded, onTog
           />
         </button>
       </div>
-      {expanded && <StationDetails station={station} fuel={fuel} />}
+      {expanded && <StationDetails station={station} fuel={fuel} isPremium={isPremium} />}
     </div>
   );
 }
@@ -690,6 +763,10 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState("idle"); // idle | sending | sent | error
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [portalLoading, setPortalLoading] = useState(false);
+  const [thresholds, setThresholds] = useState({}); // { stationId: number|null }
+  const [savings, setSavings] = useState(0);
+  const [favoritesLimitError, setFavoritesLimitError] = useState(false);
+  const [routeOrder, setRouteOrder] = useState(null); // ordered list of stations, or null
 
   const handleManageSubscription = async () => {
     setPortalLoading(true);
@@ -711,9 +788,16 @@ export default function App() {
         const data = await res.json();
         if (data.loggedIn) {
           setAccount({ email: data.email, isPremium: data.isPremium });
-          if (data.favorites?.stationIds?.length) {
-            setFavorites(new Set(data.favorites.stationIds));
+          const list = data.favorites?.stations || [];
+          if (list.length) {
+            setFavorites(new Set(list.map((s) => s.id)));
+            const thMap = {};
+            list.forEach((s) => {
+              if (s.threshold != null) thMap[s.id] = s.threshold;
+            });
+            setThresholds(thMap);
           }
+          setSavings(data.savings || 0);
         }
       } catch {
         // not logged in / offline — the site still works fully anonymously
@@ -773,8 +857,28 @@ export default function App() {
     }
   };
 
+  const syncFavoritesToServer = useCallback((ids, thMap) => {
+    fetch("/api/save-favorites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        stations: ids.map((id) => ({ id, threshold: thMap[id] ?? null })),
+        fuelId,
+        fillLiters,
+      }),
+    }).catch(() => {
+      // best-effort sync — favorites still work locally if this fails
+    });
+  }, [fuelId, fillLiters]);
+
   const toggleFavorite = useCallback((id) => {
     setFavorites((current) => {
+      const adding = !current.has(id);
+      if (adding && !account?.isPremium && current.size >= FREE_FAVORITES_LIMIT) {
+        setFavoritesLimitError(true);
+        setTimeout(() => setFavoritesLimitError(false), 4000);
+        return current;
+      }
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -783,18 +887,59 @@ export default function App() {
       } catch {
         // storage unavailable — favorites just won't persist across visits
       }
-      if (account?.email) {
-        fetch("/api/save-favorites", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ stationIds: [...next], fuelId }),
-        }).catch(() => {
-          // best-effort sync — favorites still work locally if this fails
-        });
-      }
+      if (account?.email) syncFavoritesToServer([...next], thresholds);
       return next;
     });
-  }, [account, fuelId]);
+  }, [account, thresholds, syncFavoritesToServer]);
+
+  const updateThreshold = useCallback((id, value) => {
+    setThresholds((current) => {
+      const next = { ...current, [id]: value };
+      if (account?.email) syncFavoritesToServer([...favorites], next);
+      return next;
+    });
+  }, [account, favorites, syncFavoritesToServer]);
+
+  // Simple nearest-neighbor route ordering across favorited stations that
+  // are in the current search results (we only have coordinates for those).
+  // Not a perfect "traveling salesman" solve, but a solid practical
+  // approximation for a handful of stops.
+  const optimizeRoute = useCallback(() => {
+    if (!coords) return;
+    const favStations = stations.filter((s) => favorites.has(s.id));
+    if (favStations.length < 2) return;
+    const remaining = [...favStations];
+    const order = [];
+    let current = { lat: coords.lat, lon: coords.lon };
+    while (remaining.length) {
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      remaining.forEach((s, i) => {
+        const d = distanceKm(current.lat, current.lon, s.lat, s.lon);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      });
+      const next = remaining.splice(bestIdx, 1)[0];
+      order.push(next);
+      current = next;
+    }
+    setRouteOrder(order);
+  }, [coords, stations, favorites]);
+
+  function routeGoogleMapsUrl(order) {
+    if (!coords || order.length === 0) return "#";
+    const origin = `${coords.lat},${coords.lon}`;
+    const destination = `${order[order.length - 1].lat},${order[order.length - 1].lon}`;
+    const waypoints = order
+      .slice(0, -1)
+      .map((s) => `${s.lat},${s.lon}`)
+      .join("|");
+    const params = new URLSearchParams({ api: "1", origin, destination });
+    if (waypoints) params.set("waypoints", waypoints);
+    return `https://www.google.com/maps/dir/?${params.toString()}`;
+  }
 
   const loadFranceStations = useCallback(async () => {
     if (franceLoaded || franceLoading) return;
@@ -1119,28 +1264,70 @@ export default function App() {
               )}
             </div>
 
+            {account.isPremium && savings > 0 && (
+              <div className="flex items-center gap-3 bg-[#00C896]/10 rounded-xl p-4">
+                <TrendingUp size={20} className="text-[#00C896] shrink-0" />
+                <p className="text-sm text-[#2D1B36]">
+                  <span className="font-display text-lg font-bold">
+                    {savings.toFixed(2)} €
+                  </span>{" "}
+                  économisés depuis le début grâce aux alertes de prix.
+                </p>
+              </div>
+            )}
+
             {/* Favorites list */}
             <div>
-              <p className="text-xs font-bold text-[#8A7B92] uppercase tracking-wide mb-2">
-                Mes stations favorites ({favorites.size})
-              </p>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-bold text-[#8A7B92] uppercase tracking-wide">
+                  Mes stations favorites ({favorites.size}
+                  {!account.isPremium && `/${FREE_FAVORITES_LIMIT}`})
+                </p>
+                {account.isPremium && favorites.size >= 2 && (
+                  <button
+                    onClick={optimizeRoute}
+                    className="text-xs font-bold text-[#FF4D6D] hover:underline"
+                  >
+                    Optimiser mon trajet
+                  </button>
+                )}
+              </div>
               {favorites.size === 0 ? (
                 <p className="text-sm text-[#C4B8C9]">
                   Aucune pour l'instant — clique sur l'étoile d'une station pour l'ajouter.
                 </p>
               ) : (
-                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                <div className="space-y-2 max-h-64 overflow-y-auto">
                   {stations
                     .filter((s) => favorites.has(s.id))
                     .map((s) => (
-                      <div
-                        key={s.id}
-                        className="flex items-center justify-between gap-2 bg-[#FAFAF8] rounded-lg px-3 py-2"
-                      >
-                        <span className="text-sm text-[#2D1B36] truncate">{s.address}</span>
-                        <button onClick={() => toggleFavorite(s.id)} className="shrink-0">
-                          <Star size={16} fill="#FFB020" color="#FFB020" />
-                        </button>
+                      <div key={s.id} className="bg-[#FAFAF8] rounded-lg px-3 py-2 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm text-[#2D1B36] truncate">{s.address}</span>
+                          <button onClick={() => toggleFavorite(s.id)} className="shrink-0">
+                            <Star size={16} fill="#FFB020" color="#FFB020" />
+                          </button>
+                        </div>
+                        {account.isPremium ? (
+                          <label className="flex items-center gap-1.5 text-xs text-[#8A7B92]">
+                            Alerte si prix ≤
+                            <input
+                              type="number"
+                              step="0.001"
+                              placeholder="ex: 1.750"
+                              value={thresholds[s.id] ?? ""}
+                              onChange={(e) =>
+                                updateThreshold(s.id, e.target.value ? Number(e.target.value) : null)
+                              }
+                              className="w-20 px-1.5 py-1 rounded-lg border border-[#F0EAE2] text-center font-semibold text-[#2D1B36]"
+                            />
+                            €
+                          </label>
+                        ) : (
+                          <p className="text-xs text-[#C4B8C9]">
+                            🔒 Alerte à prix cible disponible avec Premium
+                          </p>
+                        )}
                       </div>
                     ))}
                   {[...favorites].filter((id) => !stations.some((s) => s.id === id)).length > 0 && (
@@ -1148,6 +1335,26 @@ export default function App() {
                       + {[...favorites].filter((id) => !stations.some((s) => s.id === id)).length} autre(s), pas dans la recherche actuelle
                     </p>
                   )}
+                </div>
+              )}
+
+              {routeOrder && (
+                <div className="mt-3 bg-[#FFF4EF] rounded-xl p-3 space-y-2">
+                  <p className="text-xs font-bold text-[#2D1B36]">Ordre suggéré :</p>
+                  <ol className="text-xs text-[#2D1B36] space-y-1 list-decimal list-inside">
+                    {routeOrder.map((s) => (
+                      <li key={s.id} className="truncate">{s.address}</li>
+                    ))}
+                  </ol>
+                  <a
+                    href={routeGoogleMapsUrl(routeOrder)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold text-white"
+                    style={{ background: "linear-gradient(135deg, #FF4D6D, #FF8A3D)" }}
+                  >
+                    <Navigation size={13} /> Ouvrir l'itinéraire complet
+                  </a>
                 </div>
               )}
             </div>
@@ -1239,10 +1446,36 @@ export default function App() {
               <h3 className="font-display text-xl">Plein Futé Premium</h3>
             </div>
             <p className="text-sm text-[#8A7B92] leading-relaxed">
-              Reçois une notification dès que le prix baisse dans une de tes
-              stations <Star size={12} className="inline text-[#FFB020]" fill="#FFB020" /> favorites.
-              Plus besoin de vérifier toi-même.
+              Favoris illimités, alertes à prix cible, historique des prix,
+              suivi de tes économies, et optimisation de trajet multi-stations.
             </p>
+            <div className="rounded-xl overflow-hidden border border-[#F0EAE2]">
+              <div className="grid grid-cols-[1fr_auto_auto] text-xs">
+                <div className="bg-[#F5F0EA] px-3 py-2 font-bold text-[#2D1B36]"></div>
+                <div className="bg-[#F5F0EA] px-3 py-2 font-bold text-[#8A7B92] text-center">Gratuit</div>
+                <div className="bg-[#2D1B36] px-3 py-2 font-bold text-white text-center">⭐ Premium</div>
+
+                <div className="px-3 py-2 text-[#2D1B36] border-t border-[#F0EAE2]">Stations favorites</div>
+                <div className="px-3 py-2 text-center text-[#8A7B92] border-t border-[#F0EAE2]">{FREE_FAVORITES_LIMIT}</div>
+                <div className="px-3 py-2 text-center font-bold text-[#00C896] border-t border-[#F0EAE2]">Illimité</div>
+
+                <div className="px-3 py-2 text-[#2D1B36] border-t border-[#F0EAE2]">Alerte à prix cible</div>
+                <div className="px-3 py-2 text-center text-[#C4B8C9] border-t border-[#F0EAE2]">—</div>
+                <div className="px-3 py-2 text-center font-bold text-[#00C896] border-t border-[#F0EAE2]">✓</div>
+
+                <div className="px-3 py-2 text-[#2D1B36] border-t border-[#F0EAE2]">Historique des prix</div>
+                <div className="px-3 py-2 text-center text-[#C4B8C9] border-t border-[#F0EAE2]">—</div>
+                <div className="px-3 py-2 text-center font-bold text-[#00C896] border-t border-[#F0EAE2]">✓</div>
+
+                <div className="px-3 py-2 text-[#2D1B36] border-t border-[#F0EAE2]">Suivi des économies</div>
+                <div className="px-3 py-2 text-center text-[#C4B8C9] border-t border-[#F0EAE2]">—</div>
+                <div className="px-3 py-2 text-center font-bold text-[#00C896] border-t border-[#F0EAE2]">✓</div>
+
+                <div className="px-3 py-2 text-[#2D1B36] border-t border-[#F0EAE2]">Trajet multi-stations</div>
+                <div className="px-3 py-2 text-center text-[#C4B8C9] border-t border-[#F0EAE2]">—</div>
+                <div className="px-3 py-2 text-center font-bold text-[#00C896] border-t border-[#F0EAE2]">✓</div>
+              </div>
+            </div>
             <div className="bg-[#FFF4EF] rounded-xl p-4 flex items-baseline gap-1">
               <span className="font-display text-3xl text-[#2D1B36]">1,99€</span>
               <span className="text-sm text-[#8A7B92]">/ mois</span>
@@ -1465,6 +1698,21 @@ export default function App() {
           ))}
         </div>
 
+        {favoritesLimitError && (
+          <div className="flex items-center justify-between gap-3 bg-[#2D1B36] text-white rounded-xl px-4 py-3 text-sm">
+            <span>
+              ⭐ Limite de {FREE_FAVORITES_LIMIT} favoris atteinte en compte
+              gratuit.
+            </span>
+            <button
+              onClick={() => setShowPremiumModal(true)}
+              className="shrink-0 font-bold underline decoration-[#FFB020]"
+            >
+              Passer Premium
+            </button>
+          </div>
+        )}
+
         {/* Sort mode + trip assumptions */}
         <div className="bg-white rounded-2xl p-4 space-y-3 shadow-[0_4px_20px_-6px_rgba(45,27,54,0.1)]">
           <div className="flex items-center gap-2 text-xs font-bold text-[#8A7B92] uppercase tracking-wide">
@@ -1547,6 +1795,19 @@ export default function App() {
           </div>
         )}
 
+        {!loadingStations && stations.length > 0 && !account?.isPremium && (
+          <button
+            onClick={() => setShowPremiumModal(true)}
+            className="w-full text-left flex items-center gap-2 bg-[#FFF4EF] border border-[#FFB020]/30 rounded-xl px-4 py-2.5 text-xs text-[#2D1B36] hover:bg-[#FFEBE0] transition-colors"
+          >
+            <Bell size={14} className="text-[#FFB020] shrink-0" />
+            <span>
+              <strong>Passe Premium</strong> pour être alerté automatiquement
+              quand ces prix baissent encore, sans revenir vérifier.
+            </span>
+          </button>
+        )}
+
         {!loadingStations && placeLabel && stations.length === 0 && !fetchError && (
           <p className="text-sm text-[#8A7B92] px-1">
             Aucune station trouvée dans ce secteur — essaie une autre ville.
@@ -1624,6 +1885,7 @@ export default function App() {
               }
               isFavorite={favorites.has(station.id)}
               onToggleFavorite={toggleFavorite}
+              isPremium={!!account?.isPremium}
             />
           ))}
         </div>
