@@ -38,9 +38,9 @@ export default async function handler(req, res) {
     const email = session.customer_email || session.customer_details?.email;
     if (email) {
       await kv.sadd("premium_subscribers", email);
-      // Each subscriber gets their own favorites list, keyed by email —
-      // starts empty until the site pushes their favorite station ids here.
-      await kv.sadd(`subscriber:${email}:status`, "active");
+      if (session.customer) {
+        await kv.set(`stripe_customer:${email}`, session.customer);
+      }
     }
   }
 

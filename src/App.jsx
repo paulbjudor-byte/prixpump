@@ -688,6 +688,19 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authEmail, setAuthEmail] = useState("");
   const [authStatus, setAuthStatus] = useState("idle"); // idle | sending | sent | error
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [portalLoading, setPortalLoading] = useState(false);
+
+  const handleManageSubscription = async () => {
+    setPortalLoading(true);
+    try {
+      const res = await fetch("/api/create-portal-session", { method: "POST" });
+      const data = await res.json();
+      if (data.url) window.location.href = data.url;
+    } finally {
+      setPortalLoading(false);
+    }
+  };
 
   // Check for an existing session on load, and adopt server-saved favorites
   // (a logged-in account is the source of truth for favorites/premium status)
@@ -1031,13 +1044,13 @@ export default function App() {
         {accountChecked && (
           account ? (
             <button
-              onClick={handleLogout}
+              onClick={() => setShowAccountModal(true)}
               className="inline-flex items-center gap-1.5 bg-white rounded-full px-3.5 py-2 text-xs font-bold text-[#2D1B36] shadow-sm hover:scale-105 transition-transform ml-2"
               title={account.email}
             >
               <UserRound size={13} className="text-[#00C896]" />
               {account.isPremium && "⭐ "}
-              Se déconnecter
+              Mon compte
             </button>
           ) : (
             <button
@@ -1050,6 +1063,107 @@ export default function App() {
           )
         )}
       </header>
+
+      {showAccountModal && account && (
+        <div
+          className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/40 px-4 pb-4 md:pb-0"
+          onClick={() => setShowAccountModal(false)}
+        >
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-5 relative max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setShowAccountModal(false)}
+              className="absolute top-4 right-4 text-[#C4B8C9] hover:text-[#2D1B36]"
+            >
+              <X size={18} />
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-[#F5F0EA] flex items-center justify-center shrink-0">
+                <UserRound size={20} className="text-[#5A3D6B]" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-display text-xl leading-tight">Mon compte</h3>
+                <p className="text-xs text-[#8A7B92] truncate">{account.email}</p>
+              </div>
+            </div>
+
+            {/* Subscription status */}
+            <div className="bg-[#FFF4EF] rounded-xl p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-bold text-[#2D1B36]">
+                  {account.isPremium ? "⭐ Premium actif" : "Compte gratuit"}
+                </span>
+                {!account.isPremium && (
+                  <span className="text-xs text-[#8A7B92]">1,99€/mois</span>
+                )}
+              </div>
+              {account.isPremium ? (
+                <button
+                  onClick={handleManageSubscription}
+                  disabled={portalLoading}
+                  className="w-full text-sm font-bold text-white py-2.5 rounded-xl disabled:opacity-60"
+                  style={{ background: "linear-gradient(135deg, #2D1B36, #5A3D6B)" }}
+                >
+                  {portalLoading ? "…" : "Gérer mon abonnement"}
+                </button>
+              ) : (
+                <button
+                  onClick={() => {
+                    setShowAccountModal(false);
+                    setShowPremiumModal(true);
+                  }}
+                  className="w-full text-sm font-bold text-white py-2.5 rounded-xl"
+                  style={{ background: "linear-gradient(135deg, #FF4D6D, #FF8A3D)" }}
+                >
+                  Passer Premium
+                </button>
+              )}
+            </div>
+
+            {/* Favorites list */}
+            <div>
+              <p className="text-xs font-bold text-[#8A7B92] uppercase tracking-wide mb-2">
+                Mes stations favorites ({favorites.size})
+              </p>
+              {favorites.size === 0 ? (
+                <p className="text-sm text-[#C4B8C9]">
+                  Aucune pour l'instant — clique sur l'étoile d'une station pour l'ajouter.
+                </p>
+              ) : (
+                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                  {stations
+                    .filter((s) => favorites.has(s.id))
+                    .map((s) => (
+                      <div
+                        key={s.id}
+                        className="flex items-center justify-between gap-2 bg-[#FAFAF8] rounded-lg px-3 py-2"
+                      >
+                        <span className="text-sm text-[#2D1B36] truncate">{s.address}</span>
+                        <button onClick={() => toggleFavorite(s.id)} className="shrink-0">
+                          <Star size={16} fill="#FFB020" color="#FFB020" />
+                        </button>
+                      </div>
+                    ))}
+                  {[...favorites].filter((id) => !stations.some((s) => s.id === id)).length > 0 && (
+                    <p className="text-xs text-[#C4B8C9] px-1">
+                      + {[...favorites].filter((id) => !stations.some((s) => s.id === id)).length} autre(s), pas dans la recherche actuelle
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={() => {
+                handleLogout();
+                setShowAccountModal(false);
+              }}
+              className="w-full text-sm font-semibold text-[#8A7B92] py-2 hover:text-[#2D1B36]"
+            >
+              Se déconnecter
+            </button>
+          </div>
+        </div>
+      )}
 
       {showAuthModal && (
         <div
