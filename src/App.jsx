@@ -876,6 +876,7 @@ export default function App() {
       const adding = !current.has(id);
       if (adding && !account?.isPremium && current.size >= FREE_FAVORITES_LIMIT) {
         setFavoritesLimitError(true);
+        setShowPremiumModal(true);
         setTimeout(() => setFavoritesLimitError(false), 4000);
         return current;
       }
